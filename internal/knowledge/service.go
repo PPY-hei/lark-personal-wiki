@@ -36,13 +36,14 @@ type AskResult struct {
 }
 
 type RetrievedChunk struct {
-	ID         int64           `json:"id"`
-	SourceID   string          `json:"source_id"`
-	Content    string          `json:"content"`
-	Score      float64         `json:"score"`
-	Metadata   json.RawMessage `json:"metadata"`
-	CreatedAt  time.Time       `json:"created_at"`
-	SourceType string          `json:"source_type"`
+	ID            int64           `json:"id"`
+	SourceID      string          `json:"source_id"`
+	DisplaySource string          `json:"display_source"`
+	Content       string          `json:"content"`
+	Score         float64         `json:"score"`
+	Metadata      json.RawMessage `json:"metadata"`
+	CreatedAt     time.Time       `json:"created_at"`
+	SourceType    string          `json:"source_type"`
 }
 
 type unitCandidate struct {
@@ -130,10 +131,21 @@ func (s *Service) Retrieve(ctx context.Context, question string, limit int) ([]R
 
 func (s *Service) SearchByEmbedding(ctx context.Context, embedding []float32, limit int) ([]RetrievedChunk, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, source_type, source_id, content, metadata, created_at, 1 - (embedding <=> $1::vector) AS score
-		FROM knowledge_chunks
-		WHERE embedding IS NOT NULL
-		ORDER BY embedding <=> $1::vector
+		SELECT
+			kc.id,
+			kc.source_type,
+			kc.source_id,
+			coalesce(nullif(c.name, ''), kc.metadata->>'feishu_chat_id', kc.source_id) || ' / ' ||
+				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
+				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
+			kc.content,
+			kc.metadata,
+			kc.created_at,
+			1 - (kc.embedding <=> $1::vector) AS score
+		FROM knowledge_chunks kc
+		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
+		WHERE kc.embedding IS NOT NULL
+		ORDER BY kc.embedding <=> $1::vector
 		LIMIT $2
 	`, vectorLiteral(embedding), limit)
 	if err != nil {
@@ -153,11 +165,22 @@ func (s *Service) SearchByText(ctx context.Context, question string, limit int) 
 		WITH q AS (
 			SELECT websearch_to_tsquery('simple', $1) AS tsq
 		)
-		SELECT id, source_type, source_id, content, metadata, created_at,
-		       ts_rank_cd(to_tsvector('simple', content), q.tsq) AS score
-		FROM knowledge_chunks, q
-		WHERE to_tsvector('simple', content) @@ q.tsq
-		ORDER BY score DESC, updated_at DESC
+		SELECT
+			kc.id,
+			kc.source_type,
+			kc.source_id,
+			coalesce(nullif(c.name, ''), kc.metadata->>'feishu_chat_id', kc.source_id) || ' / ' ||
+				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
+				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
+			kc.content,
+			kc.metadata,
+			kc.created_at,
+		       ts_rank_cd(to_tsvector('simple', kc.content), q.tsq) AS score
+		FROM knowledge_chunks kc
+		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
+		CROSS JOIN q
+		WHERE to_tsvector('simple', kc.content) @@ q.tsq
+		ORDER BY score DESC, kc.updated_at DESC
 		LIMIT $2
 	`, query, limit)
 	if err != nil {
@@ -177,9 +200,20 @@ func (s *Service) SearchByText(ctx context.Context, question string, limit int) 
 
 func (s *Service) SearchRecent(ctx context.Context, limit int) ([]RetrievedChunk, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, source_type, source_id, content, metadata, created_at, 0::float8 AS score
-		FROM knowledge_chunks
-		ORDER BY updated_at DESC
+		SELECT
+			kc.id,
+			kc.source_type,
+			kc.source_id,
+			coalesce(nullif(c.name, ''), kc.metadata->>'feishu_chat_id', kc.source_id) || ' / ' ||
+				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
+				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
+			kc.content,
+			kc.metadata,
+			kc.created_at,
+			0::float8 AS score
+		FROM knowledge_chunks kc
+		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
+		ORDER BY kc.updated_at DESC
 		LIMIT $1
 	`, limit)
 	if err != nil {
@@ -328,8 +362,11 @@ func scanChunks(rows chunkRows) ([]RetrievedChunk, error) {
 	items := make([]RetrievedChunk, 0)
 	for rows.Next() {
 		var item RetrievedChunk
-		if err := rows.Scan(&item.ID, &item.SourceType, &item.SourceID, &item.Content, &item.Metadata, &item.CreatedAt, &item.Score); err != nil {
+		if err := rows.Scan(&item.ID, &item.SourceType, &item.SourceID, &item.DisplaySource, &item.Content, &item.Metadata, &item.CreatedAt, &item.Score); err != nil {
 			return nil, fmt.Errorf("scan retrieved chunk: %w", err)
+		}
+		if item.DisplaySource == "" {
+			item.DisplaySource = item.SourceID
 		}
 		items = append(items, item)
 	}
@@ -399,7 +436,7 @@ func estimateTokens(content string) int {
 func buildContext(chunks []RetrievedChunk) string {
 	var builder strings.Builder
 	for idx, chunk := range chunks {
-		_, _ = fmt.Fprintf(&builder, "\n[来源 %d | score %.4f | %s]\n%s\n", idx+1, chunk.Score, chunk.SourceID, chunk.Content)
+		_, _ = fmt.Fprintf(&builder, "\n[来源 %d | score %.4f | %s]\n%s\n", idx+1, chunk.Score, chunk.DisplaySource, chunk.Content)
 	}
 	if builder.Len() == 0 {
 		return "没有检索到相关聊天记录。"
