@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"feishu-kb-assistant/internal/chat"
 
@@ -202,6 +203,29 @@ func (r *Repository) ListCachedContacts(ctx context.Context) ([]RemoteContact, e
 		return nil, fmt.Errorf("iterate cached contacts: %w", err)
 	}
 	return items, nil
+}
+
+func (r *Repository) SearchCachedContacts(ctx context.Context, query string) ([]RemoteContact, error) {
+	items, err := r.ListCachedContacts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return items, nil
+	}
+	filtered := make([]RemoteContact, 0, len(items))
+	for _, item := range items {
+		if strings.Contains(strings.ToLower(item.Name), query) ||
+			strings.Contains(strings.ToLower(item.OpenID), query) ||
+			strings.Contains(strings.ToLower(item.UserID), query) ||
+			strings.Contains(strings.ToLower(item.UnionID), query) ||
+			strings.Contains(strings.ToLower(item.Email), query) ||
+			strings.Contains(strings.ToLower(item.ChatID), query) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
 }
 
 func (r *Repository) ListSelectedContacts(ctx context.Context) ([]RemoteContact, error) {

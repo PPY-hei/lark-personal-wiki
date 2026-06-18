@@ -363,8 +363,13 @@ func NewRouter(
 			return
 		}
 		var items []source.RemoteContact
+		var warning string
 		if query != "" {
 			items, err = feishuClient.SearchUsers(c.Request.Context(), session.AccessToken, query)
+			if err != nil {
+				warning = "飞书远程联系人搜索失败，已改用本地缓存结果：" + err.Error()
+				items, err = sourceRepo.SearchCachedContacts(c.Request.Context(), query)
+			}
 		} else if departmentID != "" {
 			items, err = feishuClient.ListDepartmentUsers(c.Request.Context(), session.AccessToken, departmentID)
 		} else {
@@ -384,7 +389,11 @@ func NewRouter(
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"items": cached})
+		resp := gin.H{"items": cached}
+		if warning != "" {
+			resp["warning"] = warning
+		}
+		c.JSON(http.StatusOK, resp)
 	})
 
 	admin.POST("/source/contacts/select", func(c *gin.Context) {
@@ -951,9 +960,9 @@ const adminHTML = `<!doctype html>
         const data = await api('/api/admin/source/contacts?q=' + encodeURIComponent(query));
         state.contact.items = data.items || [];
         restoreSelected('contact');
-        state.contact.page = 1;
-        render('contact');
-        toast('已加载 ' + state.contact.items.length + ' 个联系人');
+		state.contact.page = 1;
+		render('contact');
+		toast(data.warning || ('已加载 ' + state.contact.items.length + ' 个联系人'));
       } catch (err) {
         setRows('contactRows', '<tr><td colspan="5" class="error">' + escapeHtml(err.message) + '</td></tr>');
       }
