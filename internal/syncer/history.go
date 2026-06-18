@@ -13,12 +13,14 @@ import (
 )
 
 type FeishuClient interface {
+	ListUserP2PChats(ctx context.Context, userAccessToken string) ([]source.RemoteChat, error)
 	ListHistoryMessages(ctx context.Context, accessToken string, chatID string, start time.Time, end time.Time) ([]source.RemoteMessage, error)
 }
 
 type SourceRepository interface {
 	ListSelectedChats(ctx context.Context) ([]source.RemoteChat, error)
 	ListSelectedContacts(ctx context.Context) ([]source.RemoteContact, error)
+	SaveContactChatID(ctx context.Context, openID string, chatID string) error
 }
 
 type MessageRepository interface {
@@ -109,6 +111,9 @@ func (r *Runner) SyncSelectedHistory(ctx context.Context, days int) (Result, err
 	if err != nil {
 		return Result{}, err
 	}
+	if len(contacts) > 0 {
+		contacts = r.resolveP2PChatIDs(ctx, token, contacts)
+	}
 	for _, contact := range contacts {
 		if strings.TrimSpace(contact.ChatID) == "" {
 			result.SkippedContacts = append(result.SkippedContacts, SkippedItem{
@@ -127,6 +132,51 @@ func (r *Runner) SyncSelectedHistory(ctx context.Context, days int) (Result, err
 	}
 
 	return result, nil
+}
+
+func (r *Runner) resolveP2PChatIDs(ctx context.Context, accessToken string, contacts []source.RemoteContact) []source.RemoteContact {
+	chats, err := r.feishu.ListUserP2PChats(ctx, accessToken)
+	if err != nil {
+		return contacts
+	}
+	for i, contact := range contacts {
+		if contact.ChatID != "" {
+			continue
+		}
+		chatID := matchP2PChat(contact, chats)
+		if chatID == "" {
+			continue
+		}
+		contacts[i].ChatID = chatID
+		if contact.OpenID != "" {
+			_ = r.source.SaveContactChatID(ctx, contact.OpenID, chatID)
+		}
+	}
+	return contacts
+}
+
+func matchP2PChat(contact source.RemoteContact, chats []source.RemoteChat) string {
+	name := normalizeName(contact.Name)
+	if name == "" {
+		return ""
+	}
+	for _, chat := range chats {
+		chatName := normalizeName(chat.Name)
+		if chat.ChatID == "" || chatName == "" {
+			continue
+		}
+		if chatName == name || strings.Contains(chatName, name) || strings.Contains(name, chatName) {
+			return chat.ChatID
+		}
+	}
+	return ""
+}
+
+func normalizeName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, " ", "")
+	value = strings.ReplaceAll(value, "　", "")
+	return value
 }
 
 func (r *Runner) syncChat(ctx context.Context, accessToken string, sourceType string, chatID string, name string, start time.Time, end time.Time) SourceResult {

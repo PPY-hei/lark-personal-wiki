@@ -42,7 +42,25 @@ func NewClient(baseURL string, appID string, appSecret string, redirectURI strin
 }
 
 func (c *Client) OAuthAuthorizeURL(state string) string {
-	return c.baseURL + "/open-apis/authen/v1/index?redirect_uri=" + url.QueryEscape(c.redirectURI) + "&app_id=" + url.QueryEscape(c.appID) + "&state=" + url.QueryEscape(state)
+	values := url.Values{}
+	values.Set("client_id", c.appID)
+	values.Set("redirect_uri", c.redirectURI)
+	values.Set("response_type", "code")
+	values.Set("state", state)
+	values.Set("scope", strings.Join([]string{
+		"im:message.group_msg:get_as_user",
+		"im:message.p2p_msg:get_as_user",
+	}, " "))
+	return c.accountsBaseURL() + "/open-apis/authen/v1/authorize?" + values.Encode()
+}
+
+func (c *Client) accountsBaseURL() string {
+	parsed, err := url.Parse(c.baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "https://accounts.feishu.cn"
+	}
+	parsed.Host = strings.Replace(parsed.Host, "open.", "accounts.", 1)
+	return strings.TrimRight(parsed.String(), "/")
 }
 
 func (c *Client) TenantAccessToken(ctx context.Context) (string, error) {
@@ -167,25 +185,22 @@ type OAuthTokenResult struct {
 }
 
 func (c *Client) ExchangeOAuthCode(ctx context.Context, code string) (OAuthTokenResult, error) {
-	appToken, err := c.AppAccessToken(ctx)
-	if err != nil {
-		return OAuthTokenResult{}, err
-	}
-
 	body, err := json.Marshal(map[string]string{
-		"grant_type": "authorization_code",
-		"code":       code,
+		"grant_type":    "authorization_code",
+		"client_id":     c.appID,
+		"client_secret": c.appSecret,
+		"code":          code,
+		"redirect_uri":  c.redirectURI,
 	})
 	if err != nil {
 		return OAuthTokenResult{}, fmt.Errorf("marshal oauth token request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/open-apis/authen/v1/access_token", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/open-apis/authen/v2/oauth/token", bytes.NewReader(body))
 	if err != nil {
 		return OAuthTokenResult{}, fmt.Errorf("create oauth token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+appToken)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -211,14 +226,18 @@ func (c *Client) ExchangeOAuthCode(ctx context.Context, code string) (OAuthToken
 			RefreshExpiresIn int    `json:"refresh_expires_in"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return OAuthTokenResult{}, fmt.Errorf("read oauth token response: %w", err)
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return OAuthTokenResult{}, fmt.Errorf("decode oauth token response: %w", err)
 	}
 	if resp.StatusCode >= 400 || payload.Code != 0 {
-		return OAuthTokenResult{}, fmt.Errorf("oauth token failed: status=%d code=%d msg=%s", resp.StatusCode, payload.Code, payload.Msg)
+		return OAuthTokenResult{}, fmt.Errorf("oauth token failed: status=%d code=%d msg=%s body=%s", resp.StatusCode, payload.Code, payload.Msg, strings.TrimSpace(string(data)))
 	}
 
-	return OAuthTokenResult{
+	result := OAuthTokenResult{
 		AccessToken:      payload.Data.AccessToken,
 		RefreshToken:     payload.Data.RefreshToken,
 		ExpiresIn:        payload.Data.ExpiresIn,
@@ -231,14 +250,67 @@ func (c *Client) ExchangeOAuthCode(ctx context.Context, code string) (OAuthToken
 		UserID:           payload.Data.UserID,
 		Email:            payload.Data.Email,
 		TenantKey:        payload.Data.TenantKey,
-	}, nil
+	}
+	if err := c.fillUserInfo(ctx, &result); err != nil {
+		return result, nil
+	}
+	return result, nil
+}
+
+func (c *Client) fillUserInfo(ctx context.Context, result *OAuthTokenResult) error {
+	if result.AccessToken == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/open-apis/authen/v1/user_info", nil)
+	if err != nil {
+		return fmt.Errorf("create user info request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+result.AccessToken)
+
+	var payload struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Name      string `json:"name"`
+			EnName    string `json:"en_name"`
+			AvatarURL string `json:"avatar_url"`
+			OpenID    string `json:"open_id"`
+			UnionID   string `json:"union_id"`
+			UserID    string `json:"user_id"`
+			Email     string `json:"email"`
+			TenantKey string `json:"tenant_key"`
+		} `json:"data"`
+	}
+	if err := c.doJSON(req, &payload); err != nil {
+		return err
+	}
+	if payload.Code != 0 {
+		return fmt.Errorf("user info failed: code=%d msg=%s", payload.Code, payload.Msg)
+	}
+	result.Name = firstNonEmpty(result.Name, payload.Data.Name)
+	result.EnName = firstNonEmpty(result.EnName, payload.Data.EnName)
+	result.AvatarURL = firstNonEmpty(result.AvatarURL, payload.Data.AvatarURL)
+	result.OpenID = firstNonEmpty(result.OpenID, payload.Data.OpenID)
+	result.UnionID = firstNonEmpty(result.UnionID, payload.Data.UnionID)
+	result.UserID = firstNonEmpty(result.UserID, payload.Data.UserID)
+	result.Email = firstNonEmpty(result.Email, payload.Data.Email)
+	result.TenantKey = firstNonEmpty(result.TenantKey, payload.Data.TenantKey)
+	return nil
 }
 
 func (c *Client) ListUserChats(ctx context.Context, userAccessToken string) ([]source.RemoteChat, error) {
+	return c.listUserChats(ctx, userAccessToken, "group")
+}
+
+func (c *Client) ListUserP2PChats(ctx context.Context, userAccessToken string) ([]source.RemoteChat, error) {
+	return c.listUserChats(ctx, userAccessToken, "p2p")
+}
+
+func (c *Client) listUserChats(ctx context.Context, userAccessToken string, chatType string) ([]source.RemoteChat, error) {
 	values := url.Values{}
 	values.Set("page_size", "50")
 	values.Set("user_id_type", "open_id")
-	values.Set("types", "group")
+	values.Set("types", chatType)
 
 	var items []source.RemoteChat
 	for {
@@ -624,6 +696,15 @@ func firstI18nName(names map[string]string) string {
 	}
 	for _, value := range names {
 		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
 			return value
 		}
 	}

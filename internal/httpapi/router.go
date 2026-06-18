@@ -46,7 +46,11 @@ func NewRouter(
 	authRepo := auth.NewRepository(db)
 	sourceRepo := source.NewRepository(db)
 	historySyncer := syncer.NewRunner(db, feishuClient, sourceRepo, messageRepo, func(ctx context.Context) (string, error) {
-		return feishuClient.TenantAccessToken(ctx)
+		session, err := authRepo.Latest(ctx)
+		if err != nil {
+			return "", err
+		}
+		return session.AccessToken, nil
 	})
 
 	router.GET("/healthz", func(c *gin.Context) {
@@ -726,7 +730,7 @@ const adminHTML = `<!doctype html>
           </select>
           <button id="syncHistoryButton" onclick="syncHistory()">同步历史消息</button>
         </div>
-        <div id="syncResult" class="sync-result">会同步已保存选中的群；联系人需要先解析到单聊 Chat ID。</div>
+        <div id="syncResult" class="sync-result">会用当前授权用户身份同步。联系人单聊会自动尝试解析 Chat ID。</div>
       </section>
     </aside>
     <div class="content">
@@ -766,7 +770,7 @@ const adminHTML = `<!doctype html>
         <div class="section-head">
           <div>
             <h2>联系人知识源</h2>
-            <div class="section-copy">按姓名搜索联系人。若要同步单聊历史，先为联系人解析出单聊 Chat ID。</div>
+            <div class="section-copy">按姓名搜索联系人。同步时会用当前授权用户身份尝试读取单聊历史。</div>
           </div>
           <span class="badge" id="contactResultBadge">未加载</span>
         </div>
@@ -779,7 +783,6 @@ const adminHTML = `<!doctype html>
             <option value="50">每页 50</option>
           </select>
           <button onclick="loadContacts()">拉取联系人</button>
-          <button class="secondary" onclick="resolveContactChats()">解析单聊</button>
           <button class="secondary" onclick="saveContacts()">保存选中联系人</button>
         </div>
         <div class="table-wrap">
@@ -921,7 +924,7 @@ const adminHTML = `<!doctype html>
         const lines = [
           '已同步来源 ' + data.synced_sources + ' 个',
           '写入消息 ' + data.saved_messages + ' 条',
-          skipped.length ? '跳过联系人 ' + skipped.length + ' 个：缺少单聊 Chat ID' : '联系人无跳过'
+          skipped.length ? '跳过联系人 ' + skipped.length + ' 个：用户态未找到单聊 Chat ID' : '联系人无跳过'
         ];
         resultBox.textContent = lines.join('\n');
         toast('历史消息同步完成：' + data.saved_messages + ' 条');
