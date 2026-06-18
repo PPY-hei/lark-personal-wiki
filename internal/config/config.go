@@ -26,6 +26,12 @@ type Config struct {
 	FeishuBaseURL           string
 	FeishuEventMode         string
 	FeishuOAuthRedirectURI  string
+
+	OpenAIBaseURL        string
+	OpenAIAPIKey         string
+	OpenAIModel          string
+	OpenAIEmbeddingModel string
+	OpenAIWireAPI        string
 }
 
 func Load() (Config, error) {
@@ -52,6 +58,11 @@ func Load() (Config, error) {
 		FeishuBaseURL:           getenv("FEISHU_BASE_URL", "https://open.feishu.cn"),
 		FeishuEventMode:         getenv("FEISHU_EVENT_MODE", "websocket"),
 		FeishuOAuthRedirectURI:  getenv("FEISHU_OAUTH_REDIRECT_URI", "http://localhost:8081/api/auth/feishu/callback"),
+		OpenAIBaseURL:           getenv("OPENAI_BASE_URL", getenv("base_url", "https://api.openai.com/v1")),
+		OpenAIAPIKey:            getenv("OPENAI_API_KEY", ""),
+		OpenAIModel:             getenv("OPENAI_MODEL", getenv("model", "gpt-5.5")),
+		OpenAIEmbeddingModel:    getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+		OpenAIWireAPI:           getenv("OPENAI_WIRE_API", getenv("wire_api", "responses")),
 	}, nil
 }
 

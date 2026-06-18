@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"strings"
 
+	openai "feishu-kb-assistant/internal/ai/openai"
 	"feishu-kb-assistant/internal/config"
 	"feishu-kb-assistant/internal/feishu"
 	"feishu-kb-assistant/internal/httpapi"
 	"feishu-kb-assistant/internal/infra/postgres"
 	redisinfra "feishu-kb-assistant/internal/infra/redis"
+	"feishu-kb-assistant/internal/knowledge"
 	"feishu-kb-assistant/internal/message"
 
 	"github.com/gin-gonic/gin"
@@ -47,8 +49,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	feishuClient := feishu.NewClient(cfg.FeishuBaseURL, cfg.FeishuAppID, cfg.FeishuAppSecret, cfg.FeishuOAuthRedirectURI, redisClient)
 	messageRepo := message.NewRepository(db)
+	openaiClient := openai.NewClient(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIEmbeddingModel)
+	knowledgeService := knowledge.NewService(db, openaiClient)
 	eventHandler := feishu.NewEventHandler(cfg, logger, redisClient, messageRepo)
-	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo)
+	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	if shouldStartWebSocket(cfg.FeishuEventMode) {

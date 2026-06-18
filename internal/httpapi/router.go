@@ -15,6 +15,7 @@ import (
 	"feishu-kb-assistant/internal/chat"
 	"feishu-kb-assistant/internal/config"
 	"feishu-kb-assistant/internal/feishu"
+	"feishu-kb-assistant/internal/knowledge"
 	"feishu-kb-assistant/internal/message"
 	"feishu-kb-assistant/internal/source"
 	"feishu-kb-assistant/internal/syncer"
@@ -33,6 +34,7 @@ func NewRouter(
 	feishuClient *feishu.Client,
 	eventHandler *feishu.EventHandler,
 	messageRepo *message.Repository,
+	knowledgeService *knowledge.Service,
 ) *gin.Engine {
 	if cfg.AppEnv == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -152,6 +154,43 @@ func NewRouter(
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message_count": count})
+	})
+
+	admin.POST("/index", func(c *gin.Context) {
+		var req struct {
+			Days int `json:"days"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+		defer cancel()
+		result, err := knowledgeService.BuildIndex(ctx, req.Days)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+
+	admin.POST("/ask", func(c *gin.Context) {
+		var req struct {
+			Question string `json:"question"`
+			Limit    int    `json:"limit"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+		defer cancel()
+		result, err := knowledgeService.Ask(ctx, req.Question, req.Limit)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
 	})
 
 	admin.POST("/sync/history", func(c *gin.Context) {
@@ -563,6 +602,7 @@ const adminHTML = `<!doctype html>
       border-bottom: 1px solid var(--line);
     }
     .contact-toolbar { grid-template-columns: minmax(190px, .8fr) minmax(220px, 1fr) auto auto auto; }
+    .ask-toolbar { grid-template-columns: minmax(260px, 1fr) auto; }
     input:not([type="checkbox"]), select {
       border: 1px solid var(--line);
       background: var(--white);
@@ -677,11 +717,21 @@ const adminHTML = `<!doctype html>
     }
     .toast.show { opacity: 1; transform: translateY(0); }
     .muted { color: var(--graphite); font-size: 13px; line-height: 1.5; }
+    .answer-box {
+      min-height: 160px;
+      padding: 16px 18px;
+      border-top: 1px solid var(--line);
+      white-space: pre-wrap;
+      color: var(--ink);
+      line-height: 1.65;
+      font-size: 13px;
+      background: var(--paper);
+    }
     @media (max-width: 980px) {
       header { align-items: flex-start; flex-direction: column; }
       main { grid-template-columns: 1fr; }
       .timeline { min-width: 0; width: 100%; grid-template-columns: 64px 1fr 40px 1fr 48px; }
-      .toolbar, .contact-toolbar { grid-template-columns: 1fr; }
+      .toolbar, .contact-toolbar, .ask-toolbar { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -732,8 +782,34 @@ const adminHTML = `<!doctype html>
         </div>
         <div id="syncResult" class="sync-result">会用当前授权用户身份同步。联系人单聊会自动尝试解析 Chat ID。</div>
       </section>
+      <section class="panel side-card">
+        <h2>知识索引</h2>
+        <div class="sync-controls">
+          <select id="indexDays">
+            <option value="7">近 7 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+          </select>
+          <button id="buildIndexButton" onclick="buildIndex()">构建索引</button>
+        </div>
+        <div id="indexResult" class="sync-result">把聊天记录聚合成知识单元并写入向量索引。</div>
+      </section>
     </aside>
     <div class="content">
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>知识库问答</h2>
+            <div class="section-copy">先构建索引，再用 GPT 基于检索到的聊天上下文回答。</div>
+          </div>
+          <span class="badge" id="askBadge">待提问</span>
+        </div>
+        <div class="toolbar ask-toolbar">
+          <input id="askQuestion" placeholder="输入问题，例如：上次部署问题怎么处理的？" />
+          <button onclick="askKnowledge()">提问</button>
+        </div>
+        <div id="askAnswer" class="answer-box">答案会显示在这里。</div>
+      </section>
       <section class="panel">
         <div class="section-head">
           <div>
@@ -934,6 +1010,50 @@ const adminHTML = `<!doctype html>
         toast('同步失败：' + err.message);
       } finally {
         button.disabled = false;
+      }
+    }
+
+    async function buildIndex() {
+      const button = document.getElementById('buildIndexButton');
+      const resultBox = document.getElementById('indexResult');
+      const days = Number(document.getElementById('indexDays').value || 30);
+      button.disabled = true;
+      resultBox.textContent = '正在构建近 ' + days + ' 天知识索引...';
+      try {
+        const data = await api('/api/admin/index', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ days })
+        });
+        resultBox.textContent = '已生成知识单元 ' + data.units + ' 个，向量片段 ' + data.chunks + ' 个。';
+        toast('知识索引构建完成');
+      } catch (err) {
+        resultBox.textContent = err.message;
+        toast('索引失败：' + err.message);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function askKnowledge() {
+      const question = document.getElementById('askQuestion').value.trim();
+      if (!question) return toast('请输入问题');
+      const answerBox = document.getElementById('askAnswer');
+      document.getElementById('askBadge').textContent = '思考中';
+      answerBox.textContent = '正在检索聊天记录并生成答案...';
+      try {
+        const data = await api('/api/admin/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, limit: 8 })
+        });
+        const sources = (data.sources || []).map((item, index) => '[' + (index + 1) + '] ' + item.source_id + ' · score ' + Number(item.score || 0).toFixed(4)).join('\n');
+        answerBox.textContent = data.answer + (sources ? '\n\n参考片段：\n' + sources : '');
+        document.getElementById('askBadge').textContent = '已回答';
+      } catch (err) {
+        answerBox.textContent = err.message;
+        document.getElementById('askBadge').textContent = '失败';
+        toast('问答失败：' + err.message);
       }
     }
 
