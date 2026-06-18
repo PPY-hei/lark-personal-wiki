@@ -29,6 +29,7 @@ func TestShouldReply(t *testing.T) {
 	service := New(
 		nil,
 		stubAuthRepo{session: auth.Session{OpenID: "ou_authorized"}},
+		nil,
 		stubContactRepo{selected: map[string]bool{"oc_contact": true}},
 		nil,
 		nil,

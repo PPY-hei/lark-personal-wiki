@@ -65,11 +65,24 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 	knowledgeService := knowledge.NewService(db, openaiClient, cfg.OpenAIEnableEmbeddings)
 	eventHandler := feishu.NewEventHandler(cfg, logger, redisClient, messageRepo)
-	autoReplyService := autoreply.New(logger, authRepo, sourceRepo, feishuClient, knowledgeService)
+	autoReplyService := autoreply.New(logger, authRepo, messageRepo, sourceRepo, feishuClient, knowledgeService)
 	eventHandler.SetAutoReply(autoReplyService)
 	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService)
 
 	runCtx, cancel := context.WithCancel(context.Background())
+	if cfg.FeishuP2PPollEnabled {
+		p2pPoller := autoreply.NewP2PPoller(
+			logger,
+			authRepo,
+			feishuClient,
+			sourceRepo,
+			messageRepo,
+			autoReplyService,
+			cfg.FeishuP2PPollInterval,
+			cfg.FeishuP2PPollLookback,
+		)
+		go p2pPoller.Start(runCtx)
+	}
 	if shouldStartWebSocket(cfg.FeishuEventMode) {
 		wsRunner := feishu.NewWebSocketRunner(cfg.FeishuAppID, cfg.FeishuAppSecret, logger, eventHandler)
 		go func() {

@@ -21,6 +21,11 @@ type AuthRepository interface {
 	Latest(ctx context.Context) (auth.Session, error)
 }
 
+type ReplyLogRepository interface {
+	AutoReplyAlreadySent(ctx context.Context, feishuMessageID string) (bool, error)
+	SaveAutoReplyResult(ctx context.Context, msg message.Message, query string, answer string, status string, replyErr error) error
+}
+
 type ContactChatRepository interface {
 	IsSelectedContactChat(ctx context.Context, chatID string) (bool, error)
 }
@@ -32,6 +37,7 @@ type KnowledgeService interface {
 type Service struct {
 	logger    *slog.Logger
 	authRepo  AuthRepository
+	replies   ReplyLogRepository
 	contacts  ContactChatRepository
 	feishu    FeishuClient
 	knowledge KnowledgeService
@@ -50,13 +56,14 @@ type replyDecision struct {
 	Identity    replyIdentity
 }
 
-func New(logger *slog.Logger, authRepo AuthRepository, contactRepo ContactChatRepository, feishu FeishuClient, knowledge KnowledgeService) *Service {
+func New(logger *slog.Logger, authRepo AuthRepository, replyRepo ReplyLogRepository, contactRepo ContactChatRepository, feishu FeishuClient, knowledge KnowledgeService) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Service{
 		logger:    logger,
 		authRepo:  authRepo,
+		replies:   replyRepo,
 		contacts:  contactRepo,
 		feishu:    feishu,
 		knowledge: knowledge,
@@ -71,6 +78,28 @@ func (s *Service) HandleMessage(ctx context.Context, msg message.Message) {
 	}
 	s.logger.Info("trigger auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "chat_type", msg.ChatType, "identity", decision.Identity)
 	go s.reply(context.Background(), msg, decision.Identity)
+}
+
+func (s *Service) HandlePolledUserP2PMessage(ctx context.Context, msg message.Message) {
+	if strings.TrimSpace(msg.ContentText) == "" {
+		return
+	}
+	session, err := s.authRepo.Latest(ctx)
+	if err != nil {
+		s.logger.Warn("skip polled p2p auto reply without authorization", "message_id", msg.FeishuMessageID, "error", err)
+		return
+	}
+	if msg.FeishuSenderID != "" && msg.FeishuSenderID == session.OpenID {
+		return
+	}
+	if sent, err := s.autoReplyAlreadySent(ctx, msg.FeishuMessageID); err != nil {
+		s.logger.Warn("check polled p2p auto reply dedupe", "message_id", msg.FeishuMessageID, "error", err)
+		return
+	} else if sent {
+		return
+	}
+	s.logger.Info("trigger polled p2p auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "identity", replyIdentityUser)
+	go s.reply(context.Background(), msg, replyIdentityUser)
 }
 
 func (s *Service) shouldReply(ctx context.Context, msg message.Message) replyDecision {
@@ -130,6 +159,7 @@ func (s *Service) reply(parent context.Context, msg message.Message, identity re
 	question := buildQuestion(msg)
 	result, err := s.knowledge.Ask(ctx, question, 8)
 	if err != nil {
+		_ = s.saveAutoReplyResult(ctx, msg, question, "", "failed", err)
 		s.logger.Warn("generate auto reply answer", "message_id", msg.FeishuMessageID, "error", err)
 		return
 	}
@@ -139,9 +169,11 @@ func (s *Service) reply(parent context.Context, msg message.Message, identity re
 		return
 	}
 	if _, err := s.feishu.SendTextToChat(ctx, accessToken, msg.FeishuChatID, answer); err != nil {
+		_ = s.saveAutoReplyResult(ctx, msg, question, answer, "failed", err)
 		s.logger.Warn("send auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "identity", identity, "error", err)
 		return
 	}
+	_ = s.saveAutoReplyResult(ctx, msg, question, answer, "sent", nil)
 	s.logger.Info("sent auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "identity", identity)
 }
 
@@ -178,6 +210,20 @@ func (s *Service) isSelectedContactChat(ctx context.Context, chatID string) (boo
 		return false, nil
 	}
 	return s.contacts.IsSelectedContactChat(ctx, chatID)
+}
+
+func (s *Service) autoReplyAlreadySent(ctx context.Context, feishuMessageID string) (bool, error) {
+	if s.replies == nil || feishuMessageID == "" {
+		return false, nil
+	}
+	return s.replies.AutoReplyAlreadySent(ctx, feishuMessageID)
+}
+
+func (s *Service) saveAutoReplyResult(ctx context.Context, msg message.Message, query string, answer string, status string, replyErr error) error {
+	if s.replies == nil {
+		return nil
+	}
+	return s.replies.SaveAutoReplyResult(ctx, msg, query, answer, status, replyErr)
 }
 
 func buildQuestion(msg message.Message) string {
