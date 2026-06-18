@@ -182,7 +182,9 @@ func ParseMessageEvent(envelope EventEnvelope) (message.Message, bool, error) {
 			MessageType string          `json:"message_type"`
 			Content     json.RawMessage `json:"content"`
 			CreateTime  string          `json:"create_time"`
+			Mentions    []mention       `json:"mentions"`
 		} `json:"message"`
+		Mentions []mention `json:"mentions"`
 	}
 	if err := json.Unmarshal(envelope.Event, &event); err != nil {
 		return message.Message{}, false, fmt.Errorf("unmarshal message event: %w", err)
@@ -203,12 +205,17 @@ func ParseMessageEvent(envelope EventEnvelope) (message.Message, bool, error) {
 		senderID = event.Sender.SenderID.UserID
 	}
 
+	mentions := event.Message.Mentions
+	if len(mentions) == 0 {
+		mentions = event.Mentions
+	}
+
 	return message.Message{
 		FeishuMessageID: event.Message.MessageID,
 		FeishuChatID:    event.Message.ChatID,
 		FeishuSenderID:  senderID,
 		MessageType:     event.Message.MessageType,
-		ContentText:     extractTextContent(event.Message.MessageType, event.Message.Content),
+		ContentText:     extractTextContent(event.Message.MessageType, event.Message.Content, mentions),
 		RawContent:      event.Message.Content,
 		RawPayload:      envelope.Event,
 		SentAt:          sentAt,
@@ -223,18 +230,24 @@ func parseFeishuMillis(value string) (time.Time, error) {
 	return time.UnixMilli(millis), nil
 }
 
-func extractTextContent(messageType string, raw json.RawMessage) string {
+func extractTextContent(messageType string, raw json.RawMessage, mentions []mention) string {
 	raw = normalizeContentJSON(raw)
+	replacer := mentionReplacer(mentions)
+	var text string
 	switch messageType {
 	case "text":
-		return extractTextMessage(raw)
+		text = extractTextMessage(raw)
 	case "post":
-		return extractPostMessage(raw)
+		text = extractPostMessage(raw)
 	case "image":
-		return extractImageMessage(raw)
+		text = extractImageMessage(raw)
 	default:
-		return extractFallbackMessage(raw)
+		text = extractFallbackMessage(raw)
 	}
+	if replacer != nil {
+		text = replacer.Replace(text)
+	}
+	return text
 }
 
 func extractTextMessage(raw json.RawMessage) string {
@@ -311,6 +324,28 @@ type postContentItem struct {
 	Href     string `json:"href"`
 	FileKey  string `json:"file_key"`
 	FileName string `json:"file_name"`
+}
+
+type mention struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+func mentionReplacer(mentions []mention) *strings.Replacer {
+	pairs := make([]string, 0, len(mentions)*2)
+	for _, item := range mentions {
+		key := strings.TrimSpace(item.Key)
+		name := strings.TrimSpace(item.Name)
+		if key == "" || name == "" {
+			continue
+		}
+		pairs = append(pairs, key, "@"+name)
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	return strings.NewReplacer(pairs...)
 }
 
 func (i postContentItem) Text() string {

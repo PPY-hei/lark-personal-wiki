@@ -656,6 +656,7 @@ func parseHistoryMessage(raw json.RawMessage) (source.RemoteMessage, error) {
 		Body struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"body"`
+		Mentions []mention `json:"mentions"`
 	}
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return source.RemoteMessage{}, fmt.Errorf("decode history message item: %w", err)
@@ -686,7 +687,7 @@ func parseHistoryMessage(raw json.RawMessage) (source.RemoteMessage, error) {
 		ChatID:      item.ChatID,
 		SenderID:    senderID,
 		MessageType: item.MessageType,
-		ContentText: extractTextContent(item.MessageType, rawContent),
+		ContentText: extractTextContent(item.MessageType, rawContent, item.Mentions),
 		RawContent:  rawContent,
 		RawPayload:  raw,
 		SentAt:      sentAt,
