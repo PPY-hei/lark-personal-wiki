@@ -347,6 +347,47 @@ func (c *Client) ListHistoryMessages(ctx context.Context, accessToken string, ch
 	return items, nil
 }
 
+func (c *Client) SendTextMessage(ctx context.Context, accessToken string, receiveID string, text string) (string, error) {
+	content, err := json.Marshal(map[string]string{"text": text})
+	if err != nil {
+		return "", fmt.Errorf("marshal text message content: %w", err)
+	}
+	body, err := json.Marshal(map[string]string{
+		"receive_id": receiveID,
+		"msg_type":   "text",
+		"content":    string(content),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal send message request: %w", err)
+	}
+
+	reqURL := c.baseURL + "/open-apis/im/v1/messages?receive_id_type=open_id"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create send message request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	var payload struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			ChatID string `json:"chat_id"`
+		} `json:"data"`
+	}
+	if err := c.doJSON(req, &payload); err != nil {
+		return "", err
+	}
+	if payload.Code != 0 {
+		return "", fmt.Errorf("send message failed: code=%d msg=%s", payload.Code, payload.Msg)
+	}
+	if payload.Data.ChatID == "" {
+		return "", fmt.Errorf("send message response missing chat_id")
+	}
+	return payload.Data.ChatID, nil
+}
+
 func (c *Client) ListDepartmentUsers(ctx context.Context, userAccessToken string, departmentID string) ([]source.RemoteContact, error) {
 	values := url.Values{}
 	values.Set("department_id", departmentID)

@@ -175,6 +175,55 @@ func NewRouter(
 		c.JSON(http.StatusOK, result)
 	})
 
+	admin.POST("/source/contacts/resolve-chats", func(c *gin.Context) {
+		token, err := feishuClient.TenantAccessToken(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		contacts, err := sourceRepo.ListSelectedContacts(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		type itemResult struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			ChatID string `json:"chat_id,omitempty"`
+			Error  string `json:"error,omitempty"`
+		}
+		results := make([]itemResult, 0, len(contacts))
+		resolved := 0
+		for _, contact := range contacts {
+			result := itemResult{ID: firstNonEmpty(contact.OpenID, contact.UserID), Name: contact.Name, ChatID: contact.ChatID}
+			if contact.ChatID != "" {
+				resolved++
+				results = append(results, result)
+				continue
+			}
+			if contact.OpenID == "" {
+				result.Error = "missing_open_id"
+				results = append(results, result)
+				continue
+			}
+			chatID, err := feishuClient.SendTextMessage(c.Request.Context(), token, contact.OpenID, "已将此单聊加入个人知识库同步范围。")
+			if err != nil {
+				result.Error = err.Error()
+				results = append(results, result)
+				continue
+			}
+			if err := sourceRepo.SaveContactChatID(c.Request.Context(), contact.OpenID, chatID); err != nil {
+				result.Error = err.Error()
+				results = append(results, result)
+				continue
+			}
+			result.ChatID = chatID
+			resolved++
+			results = append(results, result)
+		}
+		c.JSON(http.StatusOK, gin.H{"resolved": resolved, "items": results})
+	})
+
 	admin.GET("/chats", func(c *gin.Context) {
 		items, err := chatRepo.List(c.Request.Context())
 		if err != nil {
@@ -332,6 +381,15 @@ func tokenPrefix(token string) string {
 		return token
 	}
 	return token[:8] + "..."
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func randomState() (string, error) {
@@ -708,7 +766,7 @@ const adminHTML = `<!doctype html>
         <div class="section-head">
           <div>
             <h2>联系人知识源</h2>
-            <div class="section-copy">按姓名搜索联系人，勾选后写入本地知识源配置。全量通讯录需要按部门范围同步。</div>
+            <div class="section-copy">按姓名搜索联系人。若要同步单聊历史，先为联系人解析出单聊 Chat ID。</div>
           </div>
           <span class="badge" id="contactResultBadge">未加载</span>
         </div>
@@ -721,6 +779,7 @@ const adminHTML = `<!doctype html>
             <option value="50">每页 50</option>
           </select>
           <button onclick="loadContacts()">拉取联系人</button>
+          <button class="secondary" onclick="resolveContactChats()">解析单聊</button>
           <button class="secondary" onclick="saveContacts()">保存选中联系人</button>
         </div>
         <div class="table-wrap">
@@ -872,6 +931,23 @@ const adminHTML = `<!doctype html>
         toast('同步失败：' + err.message);
       } finally {
         button.disabled = false;
+      }
+    }
+
+    async function resolveContactChats() {
+      const resultBox = document.getElementById('syncResult');
+      resultBox.textContent = '正在解析选中联系人的单聊会话...';
+      try {
+        const data = await api('/api/admin/source/contacts/resolve-chats', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        resultBox.textContent = '已解析 ' + data.resolved + ' 个联系人单聊会话。';
+        await loadCachedContacts(false);
+        toast('联系人单聊已解析');
+      } catch (err) {
+        resultBox.textContent = err.message;
+        toast('解析失败：' + err.message);
       }
     }
 
