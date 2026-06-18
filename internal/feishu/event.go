@@ -234,6 +234,7 @@ func ParseMessageEvent(envelope EventEnvelope) (message.Message, bool, error) {
 		ContentText:     extractTextContent(event.Message.MessageType, event.Message.Content, mentions),
 		MentionKeys:     mentionKeys(mentions),
 		MentionOpenIDs:  mentionOpenIDs(mentions),
+		MentionTypes:    mentionTypes(mentions),
 		RawContent:      event.Message.Content,
 		RawPayload:      envelope.Event,
 		SentAt:          sentAt,
@@ -345,12 +346,13 @@ type postContentItem struct {
 }
 
 type mention struct {
-	Key     string `json:"key"`
-	Name    string `json:"name"`
-	ID      string `json:"id"`
-	UserID  string `json:"user_id"`
-	OpenID  string `json:"open_id"`
-	UnionID string `json:"union_id"`
+	Key           string `json:"key"`
+	Name          string `json:"name"`
+	ID            string `json:"id"`
+	UserID        string `json:"user_id"`
+	OpenID        string `json:"open_id"`
+	UnionID       string `json:"union_id"`
+	MentionedType string `json:"mentioned_type"`
 }
 
 func mentionReplacer(mentions []mention) *strings.Replacer {
@@ -391,6 +393,16 @@ func mentionOpenIDs(mentions []mention) []string {
 		}
 	}
 	return openIDs
+}
+
+func mentionTypes(mentions []mention) []string {
+	types := make([]string, 0, len(mentions))
+	for _, item := range mentions {
+		if typ := strings.TrimSpace(item.MentionedType); typ != "" {
+			types = append(types, typ)
+		}
+	}
+	return types
 }
 
 func (i postContentItem) Text() string {

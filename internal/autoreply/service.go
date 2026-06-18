@@ -13,6 +13,7 @@ import (
 )
 
 type FeishuClient interface {
+	TenantAccessToken(ctx context.Context) (string, error)
 	SendTextToChat(ctx context.Context, accessToken string, chatID string, text string) (string, error)
 }
 
@@ -31,6 +32,19 @@ type Service struct {
 	knowledge KnowledgeService
 }
 
+type replyIdentity string
+
+const (
+	replyIdentityUser replyIdentity = "user"
+	replyIdentityBot  replyIdentity = "bot"
+)
+
+type replyDecision struct {
+	ShouldReply bool
+	Reason      string
+	Identity    replyIdentity
+}
+
 func New(logger *slog.Logger, authRepo AuthRepository, feishu FeishuClient, knowledge KnowledgeService) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -44,56 +58,59 @@ func New(logger *slog.Logger, authRepo AuthRepository, feishu FeishuClient, know
 }
 
 func (s *Service) HandleMessage(ctx context.Context, msg message.Message) {
-	shouldReply, reason := s.shouldReply(ctx, msg)
-	if !shouldReply {
-		s.logger.Info("skip auto reply", "message_id", msg.FeishuMessageID, "reason", reason)
+	decision := s.shouldReply(ctx, msg)
+	if !decision.ShouldReply {
+		s.logger.Info("skip auto reply", "message_id", msg.FeishuMessageID, "reason", decision.Reason)
 		return
 	}
-	s.logger.Info("trigger auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "chat_type", msg.ChatType)
-	go s.reply(context.Background(), msg)
+	s.logger.Info("trigger auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "chat_type", msg.ChatType, "identity", decision.Identity)
+	go s.reply(context.Background(), msg, decision.Identity)
 }
 
-func (s *Service) shouldReply(ctx context.Context, msg message.Message) (bool, string) {
+func (s *Service) shouldReply(ctx context.Context, msg message.Message) replyDecision {
 	if msg.FeishuMessageID == "" || msg.FeishuChatID == "" {
-		return false, "missing_message_or_chat_id"
+		return skip("missing_message_or_chat_id")
 	}
 	if strings.TrimSpace(msg.ContentText) == "" {
-		return false, "empty_content"
+		return skip("empty_content")
 	}
 	if msg.SenderType == "app" || msg.SenderType == "bot" {
-		return false, "sender_is_bot"
+		return skip("sender_is_bot")
 	}
 	session, err := s.authRepo.Latest(ctx)
 	if err != nil {
 		s.logger.Warn("skip auto reply without feishu authorization", "error", err)
-		return false, "missing_authorization"
+		return skip("missing_authorization")
 	}
 	if msg.ChatType == "p2p" {
 		if msg.FeishuSenderID != "" && msg.FeishuSenderID == session.OpenID {
-			return false, "self_p2p_message"
+			return skip("self_p2p_message")
 		}
-		return true, "p2p"
+		return replyAs(replyIdentityUser, "p2p")
 	}
 	for _, openID := range msg.MentionOpenIDs {
 		if openID == session.OpenID {
-			return true, "mention_authorized_user"
+			return replyAs(replyIdentityUser, "mention_authorized_user")
 		}
+	}
+	if hasMentionType(msg, "bot") {
+		return replyAs(replyIdentityBot, "mention_bot")
 	}
 	for _, key := range msg.MentionKeys {
 		if strings.TrimSpace(key) != "" {
-			return true, "mention_present"
+			return replyAs(replyIdentityBot, "mention_present")
 		}
 	}
-	return false, "group_without_mention"
+	return skip("group_without_mention")
 }
 
-func (s *Service) reply(parent context.Context, msg message.Message) {
+func (s *Service) reply(parent context.Context, msg message.Message, identity replyIdentity) {
 	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 	defer cancel()
 
-	session, err := s.authRepo.Latest(ctx)
+	accessToken, err := s.accessToken(ctx, identity)
 	if err != nil {
-		s.logger.Warn("load feishu authorization for auto reply", "message_id", msg.FeishuMessageID, "error", err)
+		s.logger.Warn("load auto reply token", "message_id", msg.FeishuMessageID, "identity", identity, "error", err)
 		return
 	}
 	question := buildQuestion(msg)
@@ -107,11 +124,39 @@ func (s *Service) reply(parent context.Context, msg message.Message) {
 		s.logger.Warn("skip empty auto reply answer", "message_id", msg.FeishuMessageID)
 		return
 	}
-	if _, err := s.feishu.SendTextToChat(ctx, session.AccessToken, msg.FeishuChatID, answer); err != nil {
-		s.logger.Warn("send auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "error", err)
+	if _, err := s.feishu.SendTextToChat(ctx, accessToken, msg.FeishuChatID, answer); err != nil {
+		s.logger.Warn("send auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "identity", identity, "error", err)
 		return
 	}
-	s.logger.Info("sent auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID)
+	s.logger.Info("sent auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "identity", identity)
+}
+
+func (s *Service) accessToken(ctx context.Context, identity replyIdentity) (string, error) {
+	if identity == replyIdentityBot {
+		return s.feishu.TenantAccessToken(ctx)
+	}
+	session, err := s.authRepo.Latest(ctx)
+	if err != nil {
+		return "", fmt.Errorf("load feishu authorization: %w", err)
+	}
+	return session.AccessToken, nil
+}
+
+func skip(reason string) replyDecision {
+	return replyDecision{Reason: reason}
+}
+
+func replyAs(identity replyIdentity, reason string) replyDecision {
+	return replyDecision{ShouldReply: true, Reason: reason, Identity: identity}
+}
+
+func hasMentionType(msg message.Message, typ string) bool {
+	for _, item := range msg.MentionTypes {
+		if strings.EqualFold(strings.TrimSpace(item), typ) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildQuestion(msg message.Message) string {

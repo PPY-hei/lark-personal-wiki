@@ -22,6 +22,7 @@ type Message struct {
 	ContentText     string
 	MentionKeys     []string
 	MentionOpenIDs  []string
+	MentionTypes    []string
 	RawContent      json.RawMessage
 	RawPayload      json.RawMessage
 	SentAt          *time.Time

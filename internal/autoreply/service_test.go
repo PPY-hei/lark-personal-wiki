@@ -21,9 +21,10 @@ func TestShouldReply(t *testing.T) {
 	service := New(nil, stubAuthRepo{session: auth.Session{OpenID: "ou_authorized"}}, nil, nil)
 
 	tests := []struct {
-		name string
-		msg  message.Message
-		want bool
+		name         string
+		msg          message.Message
+		want         bool
+		wantIdentity replyIdentity
 	}{
 		{
 			name: "p2p message triggers",
@@ -34,7 +35,8 @@ func TestShouldReply(t *testing.T) {
 				ChatType:        "p2p",
 				ContentText:     "帮我查一下",
 			},
-			want: true,
+			want:         true,
+			wantIdentity: replyIdentityUser,
 		},
 		{
 			name: "group mention authorized user triggers",
@@ -46,7 +48,8 @@ func TestShouldReply(t *testing.T) {
 				ContentText:     "@User 帮忙看下",
 				MentionOpenIDs:  []string{"ou_authorized"},
 			},
-			want: true,
+			want:         true,
+			wantIdentity: replyIdentityUser,
 		},
 		{
 			name: "group mention bot placeholder triggers",
@@ -57,8 +60,10 @@ func TestShouldReply(t *testing.T) {
 				ChatType:        "group",
 				ContentText:     "@Bot 帮忙看下",
 				MentionKeys:     []string{"@_user_1"},
+				MentionTypes:    []string{"bot"},
 			},
-			want: true,
+			want:         true,
+			wantIdentity: replyIdentityBot,
 		},
 		{
 			name: "plain group message does not trigger",
@@ -91,8 +96,10 @@ func TestShouldReply(t *testing.T) {
 				ChatType:        "group",
 				ContentText:     "@Bot 帮我查一下",
 				MentionKeys:     []string{"@_user_1"},
+				MentionTypes:    []string{"bot"},
 			},
-			want: true,
+			want:         true,
+			wantIdentity: replyIdentityBot,
 		},
 		{
 			name: "bot sender does not trigger",
@@ -110,9 +117,12 @@ func TestShouldReply(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _ := service.shouldReply(context.Background(), tt.msg)
-			if got != tt.want {
-				t.Fatalf("shouldReply() = %v, want %v", got, tt.want)
+			got := service.shouldReply(context.Background(), tt.msg)
+			if got.ShouldReply != tt.want {
+				t.Fatalf("ShouldReply = %v, want %v", got.ShouldReply, tt.want)
+			}
+			if got.ShouldReply && got.Identity != tt.wantIdentity {
+				t.Fatalf("Identity = %v, want %v", got.Identity, tt.wantIdentity)
 			}
 		})
 	}
