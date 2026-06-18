@@ -31,6 +31,9 @@ type Config struct {
 	OpenAIAPIKey           string
 	OpenAIModel            string
 	OpenAIEmbeddingModel   string
+	OpenAIEmbeddingBaseURL string
+	OpenAIEmbeddingAPIKey  string
+	OpenAIEmbeddingDims    int
 	OpenAIEnableEmbeddings bool
 	OpenAIWireAPI          string
 }
@@ -41,6 +44,10 @@ func Load() (Config, error) {
 	redisDB, err := strconv.Atoi(getenv("REDIS_DB", "0"))
 	if err != nil {
 		return Config{}, errors.New("REDIS_DB must be an integer")
+	}
+	embeddingDims, err := strconv.Atoi(getenv("OPENAI_EMBEDDING_DIMENSIONS", "1536"))
+	if err != nil {
+		return Config{}, errors.New("OPENAI_EMBEDDING_DIMENSIONS must be an integer")
 	}
 
 	return Config{
@@ -62,7 +69,10 @@ func Load() (Config, error) {
 		OpenAIBaseURL:           getenv("OPENAI_BASE_URL", getenv("base_url", "https://api.openai.com/v1")),
 		OpenAIAPIKey:            getenv("OPENAI_API_KEY", ""),
 		OpenAIModel:             getenv("OPENAI_MODEL", getenv("model", "gpt-5.5")),
-		OpenAIEmbeddingModel:    getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+		OpenAIEmbeddingModel:    getenv("OPENAI_EMBEDDING_MODEL", getenv("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-3-small")),
+		OpenAIEmbeddingBaseURL:  getenv("OPENAI_EMBEDDING_BASE_URL", getenv("DASHSCOPE_BASE_URL", "")),
+		OpenAIEmbeddingAPIKey:   getenv("OPENAI_EMBEDDING_API_KEY", getenv("DASHSCOPE_API_KEY", "")),
+		OpenAIEmbeddingDims:     embeddingDims,
 		OpenAIEnableEmbeddings:  getenv("OPENAI_ENABLE_EMBEDDINGS", "false") == "true",
 		OpenAIWireAPI:           getenv("OPENAI_WIRE_API", getenv("wire_api", "responses")),
 	}, nil

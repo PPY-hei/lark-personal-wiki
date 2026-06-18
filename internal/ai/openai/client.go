@@ -12,17 +12,27 @@ import (
 )
 
 type Client struct {
-	baseURL        string
-	apiKey         string
-	model          string
-	embeddingModel string
-	http           *http.Client
+	baseURL          string
+	apiKey           string
+	model            string
+	embeddingBaseURL string
+	embeddingAPIKey  string
+	embeddingModel   string
+	embeddingDims    int
+	http             *http.Client
 }
 
-func NewClient(baseURL string, apiKey string, model string, embeddingModel string) *Client {
+func NewClient(baseURL string, apiKey string, model string, embeddingBaseURL string, embeddingAPIKey string, embeddingModel string, embeddingDims int) *Client {
 	baseURL = normalizeBaseURL(baseURL)
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
+	}
+	embeddingBaseURL = normalizeBaseURL(embeddingBaseURL)
+	if embeddingBaseURL == "" {
+		embeddingBaseURL = baseURL
+	}
+	if embeddingAPIKey == "" {
+		embeddingAPIKey = apiKey
 	}
 	if model == "" {
 		model = "gpt-5.5"
@@ -30,12 +40,18 @@ func NewClient(baseURL string, apiKey string, model string, embeddingModel strin
 	if embeddingModel == "" {
 		embeddingModel = "text-embedding-3-small"
 	}
+	if embeddingDims < 0 {
+		embeddingDims = 0
+	}
 	return &Client{
-		baseURL:        baseURL,
-		apiKey:         apiKey,
-		model:          model,
-		embeddingModel: embeddingModel,
-		http:           &http.Client{Timeout: 60 * time.Second},
+		baseURL:          baseURL,
+		apiKey:           apiKey,
+		model:            model,
+		embeddingBaseURL: embeddingBaseURL,
+		embeddingAPIKey:  embeddingAPIKey,
+		embeddingModel:   embeddingModel,
+		embeddingDims:    embeddingDims,
+		http:             &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -55,21 +71,25 @@ func (c *Client) Model() string {
 }
 
 func (c *Client) Embed(ctx context.Context, input string) ([]float32, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY is required")
+	if c.embeddingAPIKey == "" {
+		return nil, fmt.Errorf("OPENAI_EMBEDDING_API_KEY or DASHSCOPE_API_KEY is required")
 	}
-	body, err := json.Marshal(map[string]any{
+	requestBody := map[string]any{
 		"model": c.embeddingModel,
 		"input": input,
-	})
+	}
+	if c.embeddingDims > 0 {
+		requestBody["dimensions"] = c.embeddingDims
+	}
+	body, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal embedding request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.embeddingBaseURL+"/embeddings", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create embedding request: %w", err)
 	}
-	c.setHeaders(req)
+	c.setHeaders(req, c.embeddingAPIKey)
 
 	var payload struct {
 		Data []struct {
@@ -105,7 +125,7 @@ func (c *Client) GenerateAnswer(ctx context.Context, question string, contextTex
 	if err != nil {
 		return "", fmt.Errorf("create response request: %w", err)
 	}
-	c.setHeaders(req)
+	c.setHeaders(req, c.apiKey)
 
 	var payload struct {
 		OutputText string `json:"output_text"`
@@ -136,9 +156,9 @@ func (c *Client) GenerateAnswer(ctx context.Context, question string, contextTex
 	return "", fmt.Errorf("response missing output text")
 }
 
-func (c *Client) setHeaders(req *http.Request) {
+func (c *Client) setHeaders(req *http.Request, apiKey string) {
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 }
 
 func (c *Client) do(req *http.Request, target any) error {

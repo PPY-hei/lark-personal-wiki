@@ -49,7 +49,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	feishuClient := feishu.NewClient(cfg.FeishuBaseURL, cfg.FeishuAppID, cfg.FeishuAppSecret, cfg.FeishuOAuthRedirectURI, redisClient)
 	messageRepo := message.NewRepository(db)
-	openaiClient := openai.NewClient(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIEmbeddingModel)
+	openaiClient := openai.NewClient(
+		cfg.OpenAIBaseURL,
+		cfg.OpenAIAPIKey,
+		cfg.OpenAIModel,
+		cfg.OpenAIEmbeddingBaseURL,
+		cfg.OpenAIEmbeddingAPIKey,
+		cfg.OpenAIEmbeddingModel,
+		cfg.OpenAIEmbeddingDims,
+	)
 	knowledgeService := knowledge.NewService(db, openaiClient, cfg.OpenAIEnableEmbeddings)
 	eventHandler := feishu.NewEventHandler(cfg, logger, redisClient, messageRepo)
 	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService)
