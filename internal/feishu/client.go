@@ -48,7 +48,8 @@ func (c *Client) OAuthAuthorizeURL(state string) string {
 	values.Set("response_type", "code")
 	values.Set("state", state)
 	values.Set("scope", strings.Join([]string{
-		"im:message.history:readonly",
+		"im:message",
+		"im:message:readonly",
 		"im:message.group_msg:get_as_user",
 		"im:message.p2p_msg:get_as_user",
 		"im:message.send_as_user",
