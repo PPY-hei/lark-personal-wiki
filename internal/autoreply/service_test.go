@@ -72,7 +72,7 @@ func TestShouldReply(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "authorized sender does not trigger",
+			name: "authorized sender p2p does not trigger",
 			msg: message.Message{
 				FeishuMessageID: "om_5",
 				FeishuChatID:    "oc_1",
@@ -81,6 +81,18 @@ func TestShouldReply(t *testing.T) {
 				ContentText:     "自己说的话",
 			},
 			want: false,
+		},
+		{
+			name: "authorized sender group mention bot triggers",
+			msg: message.Message{
+				FeishuMessageID: "om_7",
+				FeishuChatID:    "oc_1",
+				FeishuSenderID:  "ou_authorized",
+				ChatType:        "group",
+				ContentText:     "@Bot 帮我查一下",
+				MentionKeys:     []string{"@_user_1"},
+			},
+			want: true,
 		},
 		{
 			name: "bot sender does not trigger",
@@ -98,7 +110,8 @@ func TestShouldReply(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := service.shouldReply(context.Background(), tt.msg); got != tt.want {
+			got, _ := service.shouldReply(context.Background(), tt.msg)
+			if got != tt.want {
 				t.Fatalf("shouldReply() = %v, want %v", got, tt.want)
 			}
 		})

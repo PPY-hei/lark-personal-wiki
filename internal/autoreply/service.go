@@ -44,44 +44,47 @@ func New(logger *slog.Logger, authRepo AuthRepository, feishu FeishuClient, know
 }
 
 func (s *Service) HandleMessage(ctx context.Context, msg message.Message) {
-	if !s.shouldReply(ctx, msg) {
+	shouldReply, reason := s.shouldReply(ctx, msg)
+	if !shouldReply {
+		s.logger.Info("skip auto reply", "message_id", msg.FeishuMessageID, "reason", reason)
 		return
 	}
+	s.logger.Info("trigger auto reply", "message_id", msg.FeishuMessageID, "chat_id", msg.FeishuChatID, "chat_type", msg.ChatType)
 	go s.reply(context.Background(), msg)
 }
 
-func (s *Service) shouldReply(ctx context.Context, msg message.Message) bool {
+func (s *Service) shouldReply(ctx context.Context, msg message.Message) (bool, string) {
 	if msg.FeishuMessageID == "" || msg.FeishuChatID == "" {
-		return false
+		return false, "missing_message_or_chat_id"
 	}
 	if strings.TrimSpace(msg.ContentText) == "" {
-		return false
+		return false, "empty_content"
 	}
 	if msg.SenderType == "app" || msg.SenderType == "bot" {
-		return false
+		return false, "sender_is_bot"
 	}
 	session, err := s.authRepo.Latest(ctx)
 	if err != nil {
 		s.logger.Warn("skip auto reply without feishu authorization", "error", err)
-		return false
-	}
-	if msg.FeishuSenderID != "" && msg.FeishuSenderID == session.OpenID {
-		return false
+		return false, "missing_authorization"
 	}
 	if msg.ChatType == "p2p" {
-		return true
+		if msg.FeishuSenderID != "" && msg.FeishuSenderID == session.OpenID {
+			return false, "self_p2p_message"
+		}
+		return true, "p2p"
 	}
 	for _, openID := range msg.MentionOpenIDs {
 		if openID == session.OpenID {
-			return true
+			return true, "mention_authorized_user"
 		}
 	}
 	for _, key := range msg.MentionKeys {
 		if strings.TrimSpace(key) != "" {
-			return true
+			return true, "mention_present"
 		}
 	}
-	return false
+	return false, "group_without_mention"
 }
 
 func (s *Service) reply(parent context.Context, msg message.Message) {
