@@ -48,12 +48,19 @@ func (c *Client) OAuthAuthorizeURL(state string) string {
 	values.Set("response_type", "code")
 	values.Set("state", state)
 	values.Set("scope", strings.Join([]string{
+		"im:chat",
+		"im:chat:readonly",
 		"im:message",
 		"im:message:readonly",
 		"im:message.group_msg:get_as_user",
 		"im:message.p2p_msg:get_as_user",
 		"im:message.send_as_user",
-		"contact:user:search",
+		"contact:contact",
+		"contact:contact.base:readonly",
+		"contact:department.base:readonly",
+		"contact:department.organize:readonly",
+		"contact:user.base:readonly",
+		"contact:user.search",
 	}, " "))
 	return c.accountsBaseURL() + "/open-apis/authen/v1/authorize?" + values.Encode()
 }
