@@ -62,3 +62,11 @@ func (r *Repository) CountMessages(ctx context.Context) (int64, error) {
 	}
 	return count, nil
 }
+
+func (r *Repository) CountMessagesByChat(ctx context.Context, feishuChatID string) (int64, error) {
+	var count int64
+	if err := r.db.QueryRow(ctx, "SELECT count(*) FROM messages WHERE feishu_chat_id=$1", feishuChatID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count messages by chat: %w", err)
+	}
+	return count, nil
+}

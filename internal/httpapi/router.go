@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"feishu-kb-assistant/internal/feishu"
 	"feishu-kb-assistant/internal/message"
 	"feishu-kb-assistant/internal/source"
+	"feishu-kb-assistant/internal/syncer"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -43,6 +45,9 @@ func NewRouter(
 	chatRepo := chat.NewRepository(db)
 	authRepo := auth.NewRepository(db)
 	sourceRepo := source.NewRepository(db)
+	historySyncer := syncer.NewRunner(db, feishuClient, sourceRepo, messageRepo, func(ctx context.Context) (string, error) {
+		return feishuClient.TenantAccessToken(ctx)
+	})
 
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -143,6 +148,31 @@ func NewRouter(
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message_count": count})
+	})
+
+	admin.POST("/sync/history", func(c *gin.Context) {
+		var req struct {
+			Days int `json:"days"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if req.Days <= 0 {
+			req.Days = 30
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
+		defer cancel()
+		result, err := historySyncer.SyncSelectedHistory(ctx, req.Days)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, pgx.ErrNoRows) {
+				status = http.StatusUnauthorized
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
 	})
 
 	admin.GET("/chats", func(c *gin.Context) {
@@ -445,6 +475,14 @@ const adminHTML = `<!doctype html>
     }
     .metric strong { display: block; font-size: 22px; }
     .metric span { color: var(--graphite); font-size: 12px; }
+    .sync-controls { display: grid; gap: 8px; }
+    .sync-result {
+      margin-top: 10px;
+      color: var(--graphite);
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
     .content { min-width: 0; display: grid; gap: 16px; }
     .section-head {
       padding: 16px 18px 0;
@@ -619,6 +657,19 @@ const adminHTML = `<!doctype html>
         <h2>知识单元策略</h2>
         <div class="muted">当前不把单条消息直接入库。选中的群会先按群和日期聚合，再切分成可检索片段。</div>
       </section>
+      <section class="panel side-card">
+        <h2>历史消息同步</h2>
+        <div class="sync-controls">
+          <select id="historyDays">
+            <option value="7">近 7 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+            <option value="180">近 180 天</option>
+          </select>
+          <button id="syncHistoryButton" onclick="syncHistory()">同步历史消息</button>
+        </div>
+        <div id="syncResult" class="sync-result">会同步已保存选中的群；联系人需要先解析到单聊 Chat ID。</div>
+      </section>
     </aside>
     <div class="content">
       <section class="panel">
@@ -674,8 +725,8 @@ const adminHTML = `<!doctype html>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th><input type="checkbox" id="contactCheckAll" onchange="togglePage('contact', this.checked)" /></th><th>姓名</th><th>Open ID</th><th>Email</th></tr></thead>
-            <tbody id="contactRows"><tr><td colspan="4" class="empty">输入姓名后拉取联系人。</td></tr></tbody>
+            <thead><tr><th><input type="checkbox" id="contactCheckAll" onchange="togglePage('contact', this.checked)" /></th><th>姓名</th><th>Open ID</th><th>单聊 Chat ID</th><th>Email</th></tr></thead>
+            <tbody id="contactRows"><tr><td colspan="5" class="empty">输入姓名后拉取联系人。</td></tr></tbody>
           </table>
         </div>
         <div class="pager">
@@ -766,7 +817,7 @@ const adminHTML = `<!doctype html>
         render('contact');
         toast('已加载 ' + state.contact.items.length + ' 个联系人');
       } catch (err) {
-        setRows('contactRows', '<tr><td colspan="4" class="error">' + escapeHtml(err.message) + '</td></tr>');
+        setRows('contactRows', '<tr><td colspan="5" class="error">' + escapeHtml(err.message) + '</td></tr>');
       }
       updateMetrics();
     }
@@ -791,14 +842,50 @@ const adminHTML = `<!doctype html>
         render('contact');
         if (showMessage && state.contact.items.length) toast('已恢复 ' + state.contact.items.length + ' 个本地联系人');
       } catch (err) {
-        setRows('contactRows', '<tr><td colspan="4" class="error">' + escapeHtml(err.message) + '</td></tr>');
+        setRows('contactRows', '<tr><td colspan="5" class="error">' + escapeHtml(err.message) + '</td></tr>');
       }
+    }
+
+    async function syncHistory() {
+      const button = document.getElementById('syncHistoryButton');
+      const resultBox = document.getElementById('syncResult');
+      const days = Number(document.getElementById('historyDays').value || 30);
+      button.disabled = true;
+      resultBox.textContent = '正在同步近 ' + days + ' 天历史消息...';
+      try {
+        const data = await api('/api/admin/sync/history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ days })
+        });
+        const skipped = data.skipped_contacts || [];
+        const lines = [
+          '已同步来源 ' + data.synced_sources + ' 个',
+          '写入消息 ' + data.saved_messages + ' 条',
+          skipped.length ? '跳过联系人 ' + skipped.length + ' 个：缺少单聊 Chat ID' : '联系人无跳过'
+        ];
+        resultBox.textContent = lines.join('\n');
+        toast('历史消息同步完成：' + data.saved_messages + ' 条');
+        updateMessageStats();
+      } catch (err) {
+        resultBox.textContent = err.message;
+        toast('同步失败：' + err.message);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function updateMessageStats() {
+      try {
+        const data = await api('/api/admin/messages/stats');
+        document.getElementById('syncResult').textContent += '\n当前消息库共 ' + data.message_count + ' 条';
+      } catch {}
     }
 
     function render(type) {
       const rowsId = type + 'Rows';
       const data = pageItems(type);
-      const colspan = type === 'chat' ? 4 : 4;
+      const colspan = type === 'chat' ? 4 : 5;
       if (!filteredItems(type).length) {
         setRows(rowsId, '<tr><td colspan="' + colspan + '" class="empty">没有匹配结果。</td></tr>');
       } else {
@@ -825,6 +912,7 @@ const adminHTML = `<!doctype html>
       return '<tr><td><input type="checkbox" class="contact" data-key="' + escapeHtml(key) + '" onchange="toggleOne(\'contact\', this.dataset.key, this.checked)" ' + checkedAttr('contact', key) + ' /></td>' +
         '<td>' + escapeHtml(item.name || '') + '</td>' +
         '<td class="mono">' + escapeHtml(key) + '</td>' +
+        '<td class="mono">' + escapeHtml(item.chat_id || '-') + '</td>' +
         '<td>' + escapeHtml(item.email || '') + '</td></tr>';
     }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"feishu-kb-assistant/internal/config"
@@ -226,6 +227,7 @@ func extractTextContent(messageType string, raw json.RawMessage) string {
 	if messageType != "text" {
 		return ""
 	}
+	raw = normalizeContentJSON(raw)
 	var content struct {
 		Text string `json:"text"`
 	}
@@ -233,4 +235,19 @@ func extractTextContent(messageType string, raw json.RawMessage) string {
 		return ""
 	}
 	return content.Text
+}
+
+func normalizeContentJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return raw
+		}
+		return json.RawMessage(text)
+	}
+	return raw
 }

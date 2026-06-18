@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -294,6 +295,58 @@ func (c *Client) ListUserChats(ctx context.Context, userAccessToken string) ([]s
 	return items, nil
 }
 
+func (c *Client) ListHistoryMessages(ctx context.Context, accessToken string, chatID string, start time.Time, end time.Time) ([]source.RemoteMessage, error) {
+	values := url.Values{}
+	values.Set("container_id_type", "chat")
+	values.Set("container_id", chatID)
+	values.Set("start_time", fmt.Sprintf("%d", start.Unix()))
+	values.Set("end_time", fmt.Sprintf("%d", end.Unix()))
+	values.Set("page_size", "50")
+
+	items := make([]source.RemoteMessage, 0)
+	for {
+		reqURL := c.baseURL + "/open-apis/im/v1/messages?" + values.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create list history messages request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+
+		var payload struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+			Data struct {
+				Items []json.RawMessage `json:"items"`
+				Token string            `json:"page_token"`
+				More  bool              `json:"has_more"`
+			} `json:"data"`
+		}
+		if err := c.doJSON(req, &payload); err != nil {
+			return nil, err
+		}
+		if payload.Code != 0 {
+			return nil, fmt.Errorf("list history messages failed: code=%d msg=%s", payload.Code, payload.Msg)
+		}
+
+		for _, raw := range payload.Data.Items {
+			item, err := parseHistoryMessage(raw)
+			if err != nil {
+				return nil, err
+			}
+			if item.MessageID != "" {
+				items = append(items, item)
+			}
+		}
+
+		if !payload.Data.More || payload.Data.Token == "" {
+			break
+		}
+		values.Set("page_token", payload.Data.Token)
+	}
+
+	return items, nil
+}
+
 func (c *Client) ListDepartmentUsers(ctx context.Context, userAccessToken string, departmentID string) ([]source.RemoteContact, error) {
 	values := url.Values{}
 	values.Set("department_id", departmentID)
@@ -397,6 +450,7 @@ func (c *Client) SearchUsers(ctx context.Context, userAccessToken string, query 
 			UnionID     string `json:"union_id"`
 			Name        string `json:"name"`
 			Email       string `json:"email"`
+			ChatID      string `json:"chat_id"`
 			DisplayInfo string `json:"display_info"`
 			MetaData    struct {
 				MailAddress           string            `json:"mail_address"`
@@ -434,6 +488,7 @@ func (c *Client) SearchUsers(ctx context.Context, userAccessToken string, query 
 			UnionID:    item.UnionID,
 			Name:       name,
 			Email:      email,
+			ChatID:     item.ChatID,
 			RawPayload: raw,
 		})
 	}
@@ -447,13 +502,72 @@ func (c *Client) doJSON(req *http.Request, target any) error {
 		return fmt.Errorf("request %s: %w", req.URL.Path, err)
 	}
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read %s response: %w", req.URL.Path, err)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
 		return fmt.Errorf("decode %s response: %w", req.URL.Path, err)
 	}
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("request %s failed: status=%d", req.URL.Path, resp.StatusCode)
+		return fmt.Errorf("request %s failed: status=%d body=%s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return nil
+}
+
+func parseHistoryMessage(raw json.RawMessage) (source.RemoteMessage, error) {
+	var item struct {
+		MessageID   string `json:"message_id"`
+		ChatID      string `json:"chat_id"`
+		SenderID    string `json:"sender_id"`
+		MessageType string `json:"msg_type"`
+		CreateTime  string `json:"create_time"`
+		Sender      struct {
+			ID       string `json:"id"`
+			IDType   string `json:"id_type"`
+			SenderID struct {
+				UserID string `json:"user_id"`
+				OpenID string `json:"open_id"`
+			} `json:"sender_id"`
+		} `json:"sender"`
+		Body struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return source.RemoteMessage{}, fmt.Errorf("decode history message item: %w", err)
+	}
+
+	rawContent := item.Body.Content
+
+	senderID := item.SenderID
+	if senderID == "" {
+		senderID = item.Sender.ID
+	}
+	if senderID == "" {
+		senderID = item.Sender.SenderID.OpenID
+	}
+	if senderID == "" {
+		senderID = item.Sender.SenderID.UserID
+	}
+
+	var sentAt *time.Time
+	if item.CreateTime != "" {
+		if parsed, err := parseFeishuMillis(item.CreateTime); err == nil {
+			sentAt = &parsed
+		}
+	}
+
+	return source.RemoteMessage{
+		MessageID:   item.MessageID,
+		ChatID:      item.ChatID,
+		SenderID:    senderID,
+		MessageType: item.MessageType,
+		ContentText: extractTextContent(item.MessageType, rawContent),
+		RawContent:  rawContent,
+		RawPayload:  raw,
+		SentAt:      sentAt,
+	}, nil
 }
 
 func cleanSearchDisplayInfo(value string) string {
