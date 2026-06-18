@@ -224,10 +224,20 @@ func parseFeishuMillis(value string) (time.Time, error) {
 }
 
 func extractTextContent(messageType string, raw json.RawMessage) string {
-	if messageType != "text" {
-		return ""
-	}
 	raw = normalizeContentJSON(raw)
+	switch messageType {
+	case "text":
+		return extractTextMessage(raw)
+	case "post":
+		return extractPostMessage(raw)
+	case "image":
+		return extractImageMessage(raw)
+	default:
+		return extractFallbackMessage(raw)
+	}
+}
+
+func extractTextMessage(raw json.RawMessage) string {
 	var content struct {
 		Text string `json:"text"`
 	}
@@ -235,6 +245,120 @@ func extractTextContent(messageType string, raw json.RawMessage) string {
 		return ""
 	}
 	return content.Text
+}
+
+func extractPostMessage(raw json.RawMessage) string {
+	var content struct {
+		Title   string              `json:"title"`
+		Content [][]postContentItem `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return ""
+	}
+	lines := make([]string, 0, len(content.Content)+1)
+	if title := strings.TrimSpace(content.Title); title != "" {
+		lines = append(lines, title)
+	}
+	for _, line := range content.Content {
+		parts := make([]string, 0, len(line))
+		for _, item := range line {
+			if text := strings.TrimSpace(item.Text()); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		if len(parts) > 0 {
+			lines = append(lines, strings.Join(parts, " "))
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func extractImageMessage(raw json.RawMessage) string {
+	var content struct {
+		ImageKey string `json:"image_key"`
+	}
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return ""
+	}
+	if content.ImageKey == "" {
+		return "[图片]"
+	}
+	return "[图片:" + content.ImageKey + "]"
+}
+
+func extractFallbackMessage(raw json.RawMessage) string {
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return ""
+	}
+	for _, key := range []string{"text", "title", "file_name", "name"} {
+		if value, ok := object[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	if imageKey, ok := object["image_key"].(string); ok && imageKey != "" {
+		return "[图片:" + imageKey + "]"
+	}
+	return ""
+}
+
+type postContentItem struct {
+	Tag      string `json:"tag"`
+	TextRaw  string `json:"text"`
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
+	ImageKey string `json:"image_key"`
+	Href     string `json:"href"`
+	FileKey  string `json:"file_key"`
+	FileName string `json:"file_name"`
+}
+
+func (i postContentItem) Text() string {
+	switch i.Tag {
+	case "text":
+		return i.TextRaw
+	case "at":
+		if i.UserName != "" {
+			return "@" + i.UserName
+		}
+		if i.UserID != "" {
+			return "@" + i.UserID
+		}
+	case "a":
+		if i.TextRaw != "" && i.Href != "" {
+			return i.TextRaw + " " + i.Href
+		}
+		if i.TextRaw != "" {
+			return i.TextRaw
+		}
+		return i.Href
+	case "img":
+		if i.ImageKey != "" {
+			return "[图片:" + i.ImageKey + "]"
+		}
+		return "[图片]"
+	case "media":
+		if i.FileKey != "" {
+			return "[视频:" + i.FileKey + "]"
+		}
+		return "[视频]"
+	case "emotion":
+		if i.TextRaw != "" {
+			return "[" + i.TextRaw + "]"
+		}
+	case "file":
+		if i.FileName != "" {
+			return "[文件:" + i.FileName + "]"
+		}
+		if i.FileKey != "" {
+			return "[文件:" + i.FileKey + "]"
+		}
+		return "[文件]"
+	}
+	if i.TextRaw != "" {
+		return i.TextRaw
+	}
+	return ""
 }
 
 func normalizeContentJSON(raw json.RawMessage) json.RawMessage {
