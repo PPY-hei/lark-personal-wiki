@@ -118,6 +118,7 @@ func sdkMessageToEventMessage(message *larkim.EventMessage) map[string]any {
 	body := map[string]any{
 		"message_id":   deref(message.MessageId),
 		"chat_id":      deref(message.ChatId),
+		"chat_type":    deref(message.ChatType),
 		"message_type": deref(message.MessageType),
 		"create_time":  deref(message.CreateTime),
 	}
@@ -129,7 +130,37 @@ func sdkMessageToEventMessage(message *larkim.EventMessage) map[string]any {
 			body["content"] = map[string]string{"text": *message.Content}
 		}
 	}
+	if len(message.Mentions) > 0 {
+		body["mentions"] = sdkMentions(message.Mentions)
+	}
 	return body
+}
+
+func sdkMentions(items []*larkim.MentionEvent) []map[string]string {
+	mentions := make([]map[string]string, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		mention := map[string]string{
+			"key":            deref(item.Key),
+			"name":           deref(item.Name),
+			"mentioned_type": deref(item.MentionedType),
+			"tenant_key":     deref(item.TenantKey),
+		}
+		if item.Id != nil {
+			mention["user_id"] = deref(item.Id.UserId)
+			mention["open_id"] = deref(item.Id.OpenId)
+			mention["union_id"] = deref(item.Id.UnionId)
+			if mention["open_id"] != "" {
+				mention["id"] = mention["open_id"]
+			} else if mention["user_id"] != "" {
+				mention["id"] = mention["user_id"]
+			}
+		}
+		mentions = append(mentions, mention)
+	}
+	return mentions
 }
 
 func messageIDFromSDKEvent(event *larkim.P2MessageReceiveV1) string {

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	openai "feishu-kb-assistant/internal/ai/openai"
+	"feishu-kb-assistant/internal/auth"
+	"feishu-kb-assistant/internal/autoreply"
 	"feishu-kb-assistant/internal/config"
 	"feishu-kb-assistant/internal/feishu"
 	"feishu-kb-assistant/internal/httpapi"
@@ -49,6 +51,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	feishuClient := feishu.NewClient(cfg.FeishuBaseURL, cfg.FeishuAppID, cfg.FeishuAppSecret, cfg.FeishuOAuthRedirectURI, redisClient)
 	messageRepo := message.NewRepository(db)
+	authRepo := auth.NewRepository(db)
 	openaiClient := openai.NewClient(
 		cfg.OpenAIBaseURL,
 		cfg.OpenAIAPIKey,
@@ -60,6 +63,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 	knowledgeService := knowledge.NewService(db, openaiClient, cfg.OpenAIEnableEmbeddings)
 	eventHandler := feishu.NewEventHandler(cfg, logger, redisClient, messageRepo)
+	autoReplyService := autoreply.New(logger, authRepo, feishuClient, knowledgeService)
+	eventHandler.SetAutoReply(autoReplyService)
 	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService)
 
 	runCtx, cancel := context.WithCancel(context.Background())

@@ -430,6 +430,14 @@ func (c *Client) ListHistoryMessages(ctx context.Context, accessToken string, ch
 }
 
 func (c *Client) SendTextMessage(ctx context.Context, accessToken string, receiveID string, text string) (string, error) {
+	return c.sendText(ctx, accessToken, "open_id", receiveID, text)
+}
+
+func (c *Client) SendTextToChat(ctx context.Context, accessToken string, chatID string, text string) (string, error) {
+	return c.sendText(ctx, accessToken, "chat_id", chatID, text)
+}
+
+func (c *Client) sendText(ctx context.Context, accessToken string, receiveIDType string, receiveID string, text string) (string, error) {
 	content, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return "", fmt.Errorf("marshal text message content: %w", err)
@@ -443,7 +451,7 @@ func (c *Client) SendTextMessage(ctx context.Context, accessToken string, receiv
 		return "", fmt.Errorf("marshal send message request: %w", err)
 	}
 
-	reqURL := c.baseURL + "/open-apis/im/v1/messages?receive_id_type=open_id"
+	reqURL := c.baseURL + "/open-apis/im/v1/messages?receive_id_type=" + url.QueryEscape(receiveIDType)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create send message request: %w", err)

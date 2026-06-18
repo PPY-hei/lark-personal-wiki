@@ -21,11 +21,16 @@ type MessageRepository interface {
 	SaveMessage(ctx context.Context, msg message.Message) error
 }
 
+type AutoReplyHandler interface {
+	HandleMessage(ctx context.Context, msg message.Message)
+}
+
 type EventHandler struct {
-	cfg    config.Config
-	logger *slog.Logger
-	redis  *redis.Client
-	repo   MessageRepository
+	cfg       config.Config
+	logger    *slog.Logger
+	redis     *redis.Client
+	repo      MessageRepository
+	autoReply AutoReplyHandler
 }
 
 func NewEventHandler(cfg config.Config, logger *slog.Logger, redisClient *redis.Client, repo MessageRepository) *EventHandler {
@@ -35,6 +40,10 @@ func NewEventHandler(cfg config.Config, logger *slog.Logger, redisClient *redis.
 		redis:  redisClient,
 		repo:   repo,
 	}
+}
+
+func (h *EventHandler) SetAutoReply(handler AutoReplyHandler) {
+	h.autoReply = handler
 }
 
 func (h *EventHandler) Handle(c *gin.Context) {
@@ -115,6 +124,9 @@ func (h *EventHandler) ProcessEnvelope(ctx context.Context, envelope EventEnvelo
 			if err := h.repo.SaveMessage(ctx, msg); err != nil {
 				return ProcessResult{StatusCode: http.StatusInternalServerError}, fmt.Errorf("save message failed: %w", err)
 			}
+			if h.autoReply != nil {
+				h.autoReply.HandleMessage(ctx, msg)
+			}
 		}
 	}
 
@@ -175,10 +187,12 @@ func ParseMessageEvent(envelope EventEnvelope) (message.Message, bool, error) {
 				UserID string `json:"user_id"`
 				OpenID string `json:"open_id"`
 			} `json:"sender_id"`
+			SenderType string `json:"sender_type"`
 		} `json:"sender"`
 		Message struct {
 			MessageID   string          `json:"message_id"`
 			ChatID      string          `json:"chat_id"`
+			ChatType    string          `json:"chat_type"`
 			MessageType string          `json:"message_type"`
 			Content     json.RawMessage `json:"content"`
 			CreateTime  string          `json:"create_time"`
@@ -214,8 +228,12 @@ func ParseMessageEvent(envelope EventEnvelope) (message.Message, bool, error) {
 		FeishuMessageID: event.Message.MessageID,
 		FeishuChatID:    event.Message.ChatID,
 		FeishuSenderID:  senderID,
+		SenderType:      event.Sender.SenderType,
+		ChatType:        event.Message.ChatType,
 		MessageType:     event.Message.MessageType,
 		ContentText:     extractTextContent(event.Message.MessageType, event.Message.Content, mentions),
+		MentionKeys:     mentionKeys(mentions),
+		MentionOpenIDs:  mentionOpenIDs(mentions),
 		RawContent:      event.Message.Content,
 		RawPayload:      envelope.Event,
 		SentAt:          sentAt,
@@ -327,9 +345,12 @@ type postContentItem struct {
 }
 
 type mention struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
-	ID   string `json:"id"`
+	Key     string `json:"key"`
+	Name    string `json:"name"`
+	ID      string `json:"id"`
+	UserID  string `json:"user_id"`
+	OpenID  string `json:"open_id"`
+	UnionID string `json:"union_id"`
 }
 
 func mentionReplacer(mentions []mention) *strings.Replacer {
@@ -346,6 +367,30 @@ func mentionReplacer(mentions []mention) *strings.Replacer {
 		return nil
 	}
 	return strings.NewReplacer(pairs...)
+}
+
+func mentionKeys(mentions []mention) []string {
+	keys := make([]string, 0, len(mentions))
+	for _, item := range mentions {
+		if key := strings.TrimSpace(item.Key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func mentionOpenIDs(mentions []mention) []string {
+	openIDs := make([]string, 0, len(mentions))
+	for _, item := range mentions {
+		if openID := strings.TrimSpace(item.OpenID); openID != "" {
+			openIDs = append(openIDs, openID)
+			continue
+		}
+		if id := strings.TrimSpace(item.ID); strings.HasPrefix(id, "ou_") {
+			openIDs = append(openIDs, id)
+		}
+	}
+	return openIDs
 }
 
 func (i postContentItem) Text() string {
