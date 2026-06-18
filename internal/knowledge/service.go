@@ -112,6 +112,7 @@ func (s *Service) Ask(ctx context.Context, question string, limit int) (AskResul
 		_ = s.saveQALog(ctx, question, "", chunks, "failed", err)
 		return AskResult{}, err
 	}
+	answer = expandSourceReferences(answer, chunks)
 	if err := s.saveQALog(ctx, question, answer, chunks, "answered", nil); err != nil {
 		return AskResult{}, err
 	}
@@ -442,6 +443,41 @@ func buildContext(chunks []RetrievedChunk) string {
 		return "没有检索到相关聊天记录。"
 	}
 	return builder.String()
+}
+
+func expandSourceReferences(answer string, chunks []RetrievedChunk) string {
+	for idx, chunk := range chunks {
+		label := strings.TrimSpace(chunk.DisplaySource)
+		if label == "" {
+			label = strings.TrimSpace(chunk.SourceID)
+		}
+		if label == "" {
+			continue
+		}
+		sourceNo := idx + 1
+		full := fmt.Sprintf("来源 %d：%s", sourceNo, label)
+		answer = replaceLineExact(answer, fmt.Sprintf("- 来源 %d", sourceNo), "- "+full)
+		answer = replaceLineExact(answer, fmt.Sprintf("- 来源 %d：", sourceNo), "- "+full)
+		answer = replaceLineExact(answer, fmt.Sprintf("- 来源 %d:", sourceNo), "- "+full)
+		answer = replaceLineExact(answer, fmt.Sprintf("* 来源 %d", sourceNo), "* "+full)
+		answer = replaceLineExact(answer, fmt.Sprintf("* 来源 %d：", sourceNo), "* "+full)
+		answer = replaceLineExact(answer, fmt.Sprintf("* 来源 %d:", sourceNo), "* "+full)
+		answer = replaceLineExact(answer, fmt.Sprintf("来源 %d", sourceNo), full)
+		answer = replaceLineExact(answer, fmt.Sprintf("来源 %d：", sourceNo), full)
+		answer = replaceLineExact(answer, fmt.Sprintf("来源 %d:", sourceNo), full)
+	}
+	return answer
+}
+
+func replaceLineExact(text string, oldLine string, newLine string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == oldLine {
+			prefix := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			lines[i] = prefix + newLine
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 var keywordPattern = regexp.MustCompile(`[\p{Han}A-Za-z0-9_./:-]+`)
