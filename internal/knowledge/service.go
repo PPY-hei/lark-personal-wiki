@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,8 +19,9 @@ type AIClient interface {
 }
 
 type Service struct {
-	db *pgxpool.Pool
-	ai AIClient
+	db            *pgxpool.Pool
+	ai            AIClient
+	useEmbeddings bool
 }
 
 type IndexResult struct {
@@ -50,8 +52,8 @@ type unitCandidate struct {
 	MessageIDs   []int64
 }
 
-func NewService(db *pgxpool.Pool, ai AIClient) *Service {
-	return &Service{db: db, ai: ai}
+func NewService(db *pgxpool.Pool, ai AIClient, useEmbeddings bool) *Service {
+	return &Service{db: db, ai: ai, useEmbeddings: useEmbeddings}
 }
 
 func (s *Service) BuildIndex(ctx context.Context, days int) (IndexResult, error) {
@@ -75,9 +77,12 @@ func (s *Service) BuildIndex(ctx context.Context, days int) (IndexResult, error)
 
 		chunks := splitContent(unit.Content, 3200, 400)
 		for idx, content := range chunks {
-			embedding, err := s.ai.Embed(ctx, content)
-			if err != nil {
-				return result, fmt.Errorf("embed chunk %s:%d: %w", sourceID, idx, err)
+			var embedding []float32
+			if s.useEmbeddings {
+				embedding, err = s.ai.Embed(ctx, content)
+				if err != nil {
+					return result, fmt.Errorf("embed chunk %s:%d: %w", sourceID, idx, err)
+				}
 			}
 			if err := s.upsertChunk(ctx, unitID, sourceID, idx, content, embedding, unit); err != nil {
 				return result, err
@@ -96,11 +101,7 @@ func (s *Service) Ask(ctx context.Context, question string, limit int) (AskResul
 	if limit <= 0 {
 		limit = 8
 	}
-	embedding, err := s.ai.Embed(ctx, question)
-	if err != nil {
-		return AskResult{}, err
-	}
-	chunks, err := s.Search(ctx, embedding, limit)
+	chunks, err := s.Retrieve(ctx, question, limit)
 	if err != nil {
 		return AskResult{}, err
 	}
@@ -116,7 +117,18 @@ func (s *Service) Ask(ctx context.Context, question string, limit int) (AskResul
 	return AskResult{Question: question, Answer: answer, Sources: chunks}, nil
 }
 
-func (s *Service) Search(ctx context.Context, embedding []float32, limit int) ([]RetrievedChunk, error) {
+func (s *Service) Retrieve(ctx context.Context, question string, limit int) ([]RetrievedChunk, error) {
+	if s.useEmbeddings {
+		embedding, err := s.ai.Embed(ctx, question)
+		if err != nil {
+			return nil, err
+		}
+		return s.SearchByEmbedding(ctx, embedding, limit)
+	}
+	return s.SearchByText(ctx, question, limit)
+}
+
+func (s *Service) SearchByEmbedding(ctx context.Context, embedding []float32, limit int) ([]RetrievedChunk, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, source_type, source_id, content, metadata, created_at, 1 - (embedding <=> $1::vector) AS score
 		FROM knowledge_chunks
@@ -128,19 +140,53 @@ func (s *Service) Search(ctx context.Context, embedding []float32, limit int) ([
 		return nil, fmt.Errorf("search chunks: %w", err)
 	}
 	defer rows.Close()
+	return scanChunks(rows)
+}
 
-	items := make([]RetrievedChunk, 0)
-	for rows.Next() {
-		var item RetrievedChunk
-		if err := rows.Scan(&item.ID, &item.SourceType, &item.SourceID, &item.Content, &item.Metadata, &item.CreatedAt, &item.Score); err != nil {
-			return nil, fmt.Errorf("scan retrieved chunk: %w", err)
-		}
-		items = append(items, item)
+func (s *Service) SearchByText(ctx context.Context, question string, limit int) ([]RetrievedChunk, error) {
+	keywords := extractKeywords(question)
+	query := strings.Join(keywords, " | ")
+	if strings.TrimSpace(query) == "" {
+		query = question
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate retrieved chunks: %w", err)
+	rows, err := s.db.Query(ctx, `
+		WITH q AS (
+			SELECT websearch_to_tsquery('simple', $1) AS tsq
+		)
+		SELECT id, source_type, source_id, content, metadata, created_at,
+		       ts_rank_cd(to_tsvector('simple', content), q.tsq) AS score
+		FROM knowledge_chunks, q
+		WHERE to_tsvector('simple', content) @@ q.tsq
+		ORDER BY score DESC, updated_at DESC
+		LIMIT $2
+	`, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("text search chunks: %w", err)
 	}
-	return items, nil
+	defer rows.Close()
+
+	items, err := scanChunks(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) > 0 {
+		return items, nil
+	}
+	return s.SearchRecent(ctx, limit)
+}
+
+func (s *Service) SearchRecent(ctx context.Context, limit int) ([]RetrievedChunk, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, source_type, source_id, content, metadata, created_at, 0::float8 AS score
+		FROM knowledge_chunks
+		ORDER BY updated_at DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent chunks: %w", err)
+	}
+	defer rows.Close()
+	return scanChunks(rows)
 }
 
 func (s *Service) loadUnitCandidates(ctx context.Context, days int) ([]unitCandidate, error) {
@@ -243,6 +289,10 @@ func (s *Service) upsertChunk(ctx context.Context, unitID int64, unitSourceID st
 		"feishu_chat_id":    unit.FeishuChatID,
 		"unit_date":         unit.UnitDate.Format("2006-01-02"),
 	})
+	embeddingValue := any(nil)
+	if len(embedding) > 0 {
+		embeddingValue = vectorLiteral(embedding)
+	}
 	if _, err := s.db.Exec(ctx, `
 		INSERT INTO knowledge_chunks (source_type, source_id, chat_id, content, embedding, token_count, metadata, visibility_scope, updated_at)
 		VALUES (
@@ -250,7 +300,7 @@ func (s *Service) upsertChunk(ctx context.Context, unitID int64, unitSourceID st
 			$1,
 			(SELECT id FROM chats WHERE feishu_chat_id=$2),
 			$3,
-			$4::vector,
+			CASE WHEN $4::text IS NULL THEN NULL ELSE $4::vector END,
 			$5,
 			$6,
 			'current_chat',
@@ -262,10 +312,31 @@ func (s *Service) upsertChunk(ctx context.Context, unitID int64, unitSourceID st
 			token_count = EXCLUDED.token_count,
 			metadata = EXCLUDED.metadata,
 			updated_at = now()
-	`, sourceID, unit.FeishuChatID, content, vectorLiteral(embedding), estimateTokens(content), metadata); err != nil {
+	`, sourceID, unit.FeishuChatID, content, embeddingValue, estimateTokens(content), metadata); err != nil {
 		return fmt.Errorf("upsert knowledge chunk: %w", err)
 	}
 	return nil
+}
+
+type chunkRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}
+
+func scanChunks(rows chunkRows) ([]RetrievedChunk, error) {
+	items := make([]RetrievedChunk, 0)
+	for rows.Next() {
+		var item RetrievedChunk
+		if err := rows.Scan(&item.ID, &item.SourceType, &item.SourceID, &item.Content, &item.Metadata, &item.CreatedAt, &item.Score); err != nil {
+			return nil, fmt.Errorf("scan retrieved chunk: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate retrieved chunks: %w", err)
+	}
+	return items, nil
 }
 
 func (s *Service) saveQALog(ctx context.Context, question string, answer string, chunks []RetrievedChunk, status string, qaErr error) error {
@@ -334,4 +405,28 @@ func buildContext(chunks []RetrievedChunk) string {
 		return "没有检索到相关聊天记录。"
 	}
 	return builder.String()
+}
+
+var keywordPattern = regexp.MustCompile(`[\p{Han}A-Za-z0-9_./:-]+`)
+
+func extractKeywords(question string) []string {
+	raw := keywordPattern.FindAllString(question, -1)
+	seen := make(map[string]bool)
+	keywords := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if len([]rune(item)) < 2 {
+			continue
+		}
+		key := strings.ToLower(item)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		keywords = append(keywords, item)
+	}
+	if len(keywords) > 8 {
+		return keywords[:8]
+	}
+	return keywords
 }

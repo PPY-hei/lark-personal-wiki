@@ -27,11 +27,12 @@ type Config struct {
 	FeishuEventMode         string
 	FeishuOAuthRedirectURI  string
 
-	OpenAIBaseURL        string
-	OpenAIAPIKey         string
-	OpenAIModel          string
-	OpenAIEmbeddingModel string
-	OpenAIWireAPI        string
+	OpenAIBaseURL          string
+	OpenAIAPIKey           string
+	OpenAIModel            string
+	OpenAIEmbeddingModel   string
+	OpenAIEnableEmbeddings bool
+	OpenAIWireAPI          string
 }
 
 func Load() (Config, error) {
@@ -62,6 +63,7 @@ func Load() (Config, error) {
 		OpenAIAPIKey:            getenv("OPENAI_API_KEY", ""),
 		OpenAIModel:             getenv("OPENAI_MODEL", getenv("model", "gpt-5.5")),
 		OpenAIEmbeddingModel:    getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+		OpenAIEnableEmbeddings:  getenv("OPENAI_ENABLE_EMBEDDINGS", "false") == "true",
 		OpenAIWireAPI:           getenv("OPENAI_WIRE_API", getenv("wire_api", "responses")),
 	}, nil
 }
