@@ -15,6 +15,7 @@ import (
 	redisinfra "feishu-kb-assistant/internal/infra/redis"
 	"feishu-kb-assistant/internal/knowledge"
 	"feishu-kb-assistant/internal/message"
+	"feishu-kb-assistant/internal/source"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,6 +53,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	feishuClient := feishu.NewClient(cfg.FeishuBaseURL, cfg.FeishuAppID, cfg.FeishuAppSecret, cfg.FeishuOAuthRedirectURI, redisClient)
 	messageRepo := message.NewRepository(db)
 	authRepo := auth.NewRepository(db)
+	sourceRepo := source.NewRepository(db)
 	openaiClient := openai.NewClient(
 		cfg.OpenAIBaseURL,
 		cfg.OpenAIAPIKey,
@@ -63,7 +65,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 	knowledgeService := knowledge.NewService(db, openaiClient, cfg.OpenAIEnableEmbeddings)
 	eventHandler := feishu.NewEventHandler(cfg, logger, redisClient, messageRepo)
-	autoReplyService := autoreply.New(logger, authRepo, feishuClient, knowledgeService)
+	autoReplyService := autoreply.New(logger, authRepo, sourceRepo, feishuClient, knowledgeService)
 	eventHandler.SetAutoReply(autoReplyService)
 	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService)
 

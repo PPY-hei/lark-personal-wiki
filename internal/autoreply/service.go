@@ -21,6 +21,10 @@ type AuthRepository interface {
 	Latest(ctx context.Context) (auth.Session, error)
 }
 
+type ContactChatRepository interface {
+	IsSelectedContactChat(ctx context.Context, chatID string) (bool, error)
+}
+
 type KnowledgeService interface {
 	Ask(ctx context.Context, question string, limit int) (knowledge.AskResult, error)
 }
@@ -28,6 +32,7 @@ type KnowledgeService interface {
 type Service struct {
 	logger    *slog.Logger
 	authRepo  AuthRepository
+	contacts  ContactChatRepository
 	feishu    FeishuClient
 	knowledge KnowledgeService
 }
@@ -45,13 +50,14 @@ type replyDecision struct {
 	Identity    replyIdentity
 }
 
-func New(logger *slog.Logger, authRepo AuthRepository, feishu FeishuClient, knowledge KnowledgeService) *Service {
+func New(logger *slog.Logger, authRepo AuthRepository, contactRepo ContactChatRepository, feishu FeishuClient, knowledge KnowledgeService) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Service{
 		logger:    logger,
 		authRepo:  authRepo,
+		contacts:  contactRepo,
 		feishu:    feishu,
 		knowledge: knowledge,
 	}
@@ -86,7 +92,15 @@ func (s *Service) shouldReply(ctx context.Context, msg message.Message) replyDec
 		if msg.FeishuSenderID != "" && msg.FeishuSenderID == session.OpenID {
 			return skip("self_p2p_message")
 		}
-		return replyAs(replyIdentityUser, "p2p")
+		isContactChat, err := s.isSelectedContactChat(ctx, msg.FeishuChatID)
+		if err != nil {
+			s.logger.Warn("check p2p chat owner", "chat_id", msg.FeishuChatID, "error", err)
+			return skip("p2p_chat_owner_unknown")
+		}
+		if isContactChat {
+			return replyAs(replyIdentityUser, "p2p_authorized_user")
+		}
+		return replyAs(replyIdentityBot, "p2p_bot")
 	}
 	for _, openID := range msg.MentionOpenIDs {
 		if openID == session.OpenID {
@@ -157,6 +171,13 @@ func hasMentionType(msg message.Message, typ string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Service) isSelectedContactChat(ctx context.Context, chatID string) (bool, error) {
+	if s.contacts == nil {
+		return false, nil
+	}
+	return s.contacts.IsSelectedContactChat(ctx, chatID)
 }
 
 func buildQuestion(msg message.Message) string {

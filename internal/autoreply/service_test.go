@@ -17,8 +17,22 @@ func (s stubAuthRepo) Latest(context.Context) (auth.Session, error) {
 	return s.session, s.err
 }
 
+type stubContactRepo struct {
+	selected map[string]bool
+}
+
+func (s stubContactRepo) IsSelectedContactChat(_ context.Context, chatID string) (bool, error) {
+	return s.selected[chatID], nil
+}
+
 func TestShouldReply(t *testing.T) {
-	service := New(nil, stubAuthRepo{session: auth.Session{OpenID: "ou_authorized"}}, nil, nil)
+	service := New(
+		nil,
+		stubAuthRepo{session: auth.Session{OpenID: "ou_authorized"}},
+		stubContactRepo{selected: map[string]bool{"oc_contact": true}},
+		nil,
+		nil,
+	)
 
 	tests := []struct {
 		name         string
@@ -27,10 +41,22 @@ func TestShouldReply(t *testing.T) {
 		wantIdentity replyIdentity
 	}{
 		{
-			name: "p2p message triggers",
+			name: "bot p2p message triggers bot reply",
 			msg: message.Message{
 				FeishuMessageID: "om_1",
 				FeishuChatID:    "oc_1",
+				FeishuSenderID:  "ou_other",
+				ChatType:        "p2p",
+				ContentText:     "帮我查一下",
+			},
+			want:         true,
+			wantIdentity: replyIdentityBot,
+		},
+		{
+			name: "selected contact p2p message triggers user reply",
+			msg: message.Message{
+				FeishuMessageID: "om_8",
+				FeishuChatID:    "oc_contact",
 				FeishuSenderID:  "ou_other",
 				ChatType:        "p2p",
 				ContentText:     "帮我查一下",

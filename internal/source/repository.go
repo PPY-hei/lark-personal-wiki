@@ -268,3 +268,21 @@ func (r *Repository) SaveContactChatID(ctx context.Context, openID string, chatI
 	}
 	return nil
 }
+
+func (r *Repository) IsSelectedContactChat(ctx context.Context, chatID string) (bool, error) {
+	if chatID == "" {
+		return false, nil
+	}
+	var exists bool
+	if err := r.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM contacts
+			WHERE selected=true
+			  AND feishu_chat_id=$1
+		)
+	`, chatID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check selected contact chat: %w", err)
+	}
+	return exists, nil
+}
