@@ -48,6 +48,7 @@ func (c *Client) OAuthAuthorizeURL(state string) string {
 	values.Set("response_type", "code")
 	values.Set("state", state)
 	values.Set("scope", strings.Join([]string{
+		"im:message.history:readonly",
 		"im:message.group_msg:get_as_user",
 		"im:message.p2p_msg:get_as_user",
 	}, " "))
@@ -209,9 +210,13 @@ func (c *Client) ExchangeOAuthCode(ctx context.Context, code string) (OAuthToken
 	defer resp.Body.Close()
 
 	var payload struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
+		Code                  int    `json:"code"`
+		Msg                   string `json:"msg"`
+		AccessToken           string `json:"access_token"`
+		ExpiresIn             int    `json:"expires_in"`
+		RefreshToken          string `json:"refresh_token"`
+		RefreshTokenExpiresIn int    `json:"refresh_token_expires_in"`
+		Data                  struct {
 			AccessToken      string `json:"access_token"`
 			ExpiresIn        int    `json:"expires_in"`
 			Name             string `json:"name"`
@@ -238,10 +243,10 @@ func (c *Client) ExchangeOAuthCode(ctx context.Context, code string) (OAuthToken
 	}
 
 	result := OAuthTokenResult{
-		AccessToken:      payload.Data.AccessToken,
-		RefreshToken:     payload.Data.RefreshToken,
-		ExpiresIn:        payload.Data.ExpiresIn,
-		RefreshExpiresIn: payload.Data.RefreshExpiresIn,
+		AccessToken:      firstNonEmpty(payload.AccessToken, payload.Data.AccessToken),
+		RefreshToken:     firstNonEmpty(payload.RefreshToken, payload.Data.RefreshToken),
+		ExpiresIn:        firstNonZero(payload.ExpiresIn, payload.Data.ExpiresIn),
+		RefreshExpiresIn: firstNonZero(payload.RefreshTokenExpiresIn, payload.Data.RefreshExpiresIn),
 		Name:             payload.Data.Name,
 		EnName:           payload.Data.EnName,
 		AvatarURL:        payload.Data.AvatarURL,
@@ -250,6 +255,9 @@ func (c *Client) ExchangeOAuthCode(ctx context.Context, code string) (OAuthToken
 		UserID:           payload.Data.UserID,
 		Email:            payload.Data.Email,
 		TenantKey:        payload.Data.TenantKey,
+	}
+	if result.AccessToken == "" {
+		return OAuthTokenResult{}, fmt.Errorf("oauth token response missing access_token: %s", strings.TrimSpace(string(data)))
 	}
 	if err := c.fillUserInfo(ctx, &result); err != nil {
 		return result, nil
@@ -709,4 +717,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
