@@ -55,6 +55,7 @@ func (c *Client) OAuthAuthorizeURL(state string) string {
 		"im:message.group_msg:get_as_user",
 		"im:message.p2p_msg:get_as_user",
 		"im:message.send_as_user",
+		"offline_access",
 		"contact:contact",
 		"contact:contact.base:readonly",
 		"contact:department.base:readonly",
@@ -206,7 +207,27 @@ func (c *Client) ExchangeOAuthCode(ctx context.Context, code string) (OAuthToken
 	if err != nil {
 		return OAuthTokenResult{}, fmt.Errorf("marshal oauth token request: %w", err)
 	}
+	return c.requestOAuthToken(ctx, body)
+}
 
+func (c *Client) RefreshOAuthToken(ctx context.Context, refreshToken string) (OAuthTokenResult, error) {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return OAuthTokenResult{}, fmt.Errorf("refresh token is required")
+	}
+	body, err := json.Marshal(map[string]string{
+		"grant_type":    "refresh_token",
+		"client_id":     c.appID,
+		"client_secret": c.appSecret,
+		"refresh_token": refreshToken,
+	})
+	if err != nil {
+		return OAuthTokenResult{}, fmt.Errorf("marshal oauth refresh request: %w", err)
+	}
+	return c.requestOAuthToken(ctx, body)
+}
+
+func (c *Client) requestOAuthToken(ctx context.Context, body []byte) (OAuthTokenResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/open-apis/authen/v2/oauth/token", bytes.NewReader(body))
 	if err != nil {
 		return OAuthTokenResult{}, fmt.Errorf("create oauth token request: %w", err)

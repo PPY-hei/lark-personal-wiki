@@ -20,16 +20,7 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 }
 
 func (r *Repository) SaveOAuthSession(ctx context.Context, result feishu.OAuthTokenResult) (Session, error) {
-	var accessExpiresAt *time.Time
-	if result.ExpiresIn > 0 {
-		value := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
-		accessExpiresAt = &value
-	}
-	var refreshExpiresAt *time.Time
-	if result.RefreshExpiresIn > 0 {
-		value := time.Now().Add(time.Duration(result.RefreshExpiresIn) * time.Second)
-		refreshExpiresAt = &value
-	}
+	accessExpiresAt, refreshExpiresAt := tokenExpiryTimes(result)
 
 	var session Session
 	err := r.db.QueryRow(ctx, `
@@ -57,6 +48,45 @@ func (r *Repository) SaveOAuthSession(ctx context.Context, result feishu.OAuthTo
 	)
 	if err != nil {
 		return Session{}, fmt.Errorf("save oauth session: %w", err)
+	}
+	return session, nil
+}
+
+func (r *Repository) UpdateSessionTokens(ctx context.Context, sessionID int64, result feishu.OAuthTokenResult) (Session, error) {
+	accessExpiresAt, refreshExpiresAt := tokenExpiryTimes(result)
+
+	var session Session
+	err := r.db.QueryRow(ctx, `
+		UPDATE feishu_auth_sessions
+		SET
+			access_token = $2,
+			refresh_token = coalesce(nullif($3, ''), refresh_token),
+			access_token_expires_at = $4,
+			refresh_token_expires_at = coalesce($5, refresh_token_expires_at),
+			updated_at = now()
+		WHERE id = $1
+		RETURNING id, open_id, union_id, user_id, name, email, tenant_key, access_token, refresh_token,
+		          access_token_expires_at, refresh_token_expires_at, created_at, updated_at
+	`, sessionID, result.AccessToken, result.RefreshToken, accessExpiresAt, refreshExpiresAt).Scan(
+		&session.ID,
+		&session.OpenID,
+		&session.UnionID,
+		&session.UserID,
+		&session.Name,
+		&session.Email,
+		&session.TenantKey,
+		&session.AccessToken,
+		&session.RefreshToken,
+		&session.AccessTokenExpiresAt,
+		&session.RefreshTokenExpiresAt,
+		&session.CreatedAt,
+		&session.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return Session{}, err
+		}
+		return Session{}, fmt.Errorf("update oauth session tokens: %w", err)
 	}
 	return session, nil
 }
@@ -91,4 +121,18 @@ func (r *Repository) Latest(ctx context.Context) (Session, error) {
 		return Session{}, fmt.Errorf("get latest oauth session: %w", err)
 	}
 	return session, nil
+}
+
+func tokenExpiryTimes(result feishu.OAuthTokenResult) (*time.Time, *time.Time) {
+	var accessExpiresAt *time.Time
+	if result.ExpiresIn > 0 {
+		value := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+		accessExpiresAt = &value
+	}
+	var refreshExpiresAt *time.Time
+	if result.RefreshExpiresIn > 0 {
+		value := time.Now().Add(time.Duration(result.RefreshExpiresIn) * time.Second)
+		refreshExpiresAt = &value
+	}
+	return accessExpiresAt, refreshExpiresAt
 }

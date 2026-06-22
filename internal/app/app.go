@@ -70,6 +70,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService)
 
 	runCtx, cancel := context.WithCancel(context.Background())
+	if cfg.FeishuTokenRefreshEnabled {
+		tokenRefresher := auth.NewTokenRefresher(
+			logger,
+			authRepo,
+			feishuClient,
+			cfg.FeishuTokenRefreshInterval,
+			cfg.FeishuTokenRefreshBefore,
+		)
+		go tokenRefresher.Start(runCtx)
+	}
 	if cfg.FeishuP2PPollEnabled {
 		p2pPoller := autoreply.NewP2PPoller(
 			logger,
