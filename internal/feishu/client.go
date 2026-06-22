@@ -466,6 +466,49 @@ func (c *Client) SendTextToChat(ctx context.Context, accessToken string, chatID 
 	return c.sendText(ctx, accessToken, "chat_id", chatID, text)
 }
 
+func (c *Client) DownloadMessageResource(ctx context.Context, accessToken string, messageID string, fileKey string, resourceType string, maxBytes int64) ([]byte, string, error) {
+	messageID = strings.TrimSpace(messageID)
+	fileKey = strings.TrimSpace(fileKey)
+	resourceType = strings.TrimSpace(resourceType)
+	if resourceType == "" {
+		resourceType = "image"
+	}
+	if messageID == "" || fileKey == "" {
+		return nil, "", fmt.Errorf("message id and file key are required")
+	}
+	if maxBytes <= 0 {
+		maxBytes = 10 << 20
+	}
+	reqURL := c.baseURL + "/open-apis/im/v1/messages/" + url.PathEscape(messageID) + "/resources/" + url.PathEscape(fileKey) + "?type=" + url.QueryEscape(resourceType)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("create download message resource request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("request message resource: %w", err)
+	}
+	defer resp.Body.Close()
+
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("read message resource response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("download message resource failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, "", fmt.Errorf("message resource exceeds max size %d bytes", maxBytes)
+	}
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	return data, contentType, nil
+}
+
 func (c *Client) sendText(ctx context.Context, accessToken string, receiveIDType string, receiveID string, text string) (string, error) {
 	content, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {

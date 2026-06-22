@@ -16,6 +16,7 @@ import (
 	"feishu-kb-assistant/internal/config"
 	"feishu-kb-assistant/internal/feishu"
 	"feishu-kb-assistant/internal/knowledge"
+	"feishu-kb-assistant/internal/media"
 	"feishu-kb-assistant/internal/message"
 	"feishu-kb-assistant/internal/source"
 	"feishu-kb-assistant/internal/syncer"
@@ -35,6 +36,7 @@ func NewRouter(
 	eventHandler *feishu.EventHandler,
 	messageRepo *message.Repository,
 	knowledgeService *knowledge.Service,
+	mediaEnricher *media.Enricher,
 ) *gin.Engine {
 	if cfg.AppEnv == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -54,6 +56,7 @@ func NewRouter(
 		}
 		return session.AccessToken, nil
 	})
+	historySyncer.SetMessageEnricher(mediaEnricher)
 
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})

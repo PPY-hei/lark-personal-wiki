@@ -28,11 +28,16 @@ type MessageRepository interface {
 	CountMessagesByChat(ctx context.Context, feishuChatID string) (int64, error)
 }
 
+type MessageEnricher interface {
+	EnrichMessage(ctx context.Context, accessToken string, msg message.Message) message.Message
+}
+
 type Runner struct {
 	db        *pgxpool.Pool
 	feishu    FeishuClient
 	source    SourceRepository
 	messages  MessageRepository
+	enricher  MessageEnricher
 	tokenFunc func(context.Context) (string, error)
 }
 
@@ -72,6 +77,10 @@ func NewRunner(
 		messages:  messageRepo,
 		tokenFunc: tokenFunc,
 	}
+}
+
+func (r *Runner) SetMessageEnricher(enricher MessageEnricher) {
+	r.enricher = enricher
 }
 
 func (r *Runner) SyncSelectedHistory(ctx context.Context, days int) (Result, error) {
@@ -206,7 +215,7 @@ func (r *Runner) syncChat(ctx context.Context, accessToken string, sourceType st
 		if item.ChatID == "" {
 			item.ChatID = chatID
 		}
-		if err := r.messages.SaveMessage(ctx, message.Message{
+		msg := message.Message{
 			FeishuMessageID: item.MessageID,
 			FeishuChatID:    item.ChatID,
 			FeishuSenderID:  item.SenderID,
@@ -215,7 +224,11 @@ func (r *Runner) syncChat(ctx context.Context, accessToken string, sourceType st
 			RawContent:      item.RawContent,
 			RawPayload:      item.RawPayload,
 			SentAt:          item.SentAt,
-		}); err != nil {
+		}
+		if r.enricher != nil {
+			msg = r.enricher.EnrichMessage(ctx, accessToken, msg)
+		}
+		if err := r.messages.SaveMessage(ctx, msg); err != nil {
 			sourceResult.Error = err.Error()
 			_ = r.finishJob(ctx, jobID, "failed", sourceResult.MessageCount, err)
 			return sourceResult

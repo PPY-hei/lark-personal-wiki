@@ -25,12 +25,18 @@ type AutoReplyHandler interface {
 	HandleMessage(ctx context.Context, msg message.Message)
 }
 
+type MessageEnricher interface {
+	EnrichMessage(ctx context.Context, accessToken string, msg message.Message) message.Message
+}
+
 type EventHandler struct {
 	cfg       config.Config
 	logger    *slog.Logger
 	redis     *redis.Client
 	repo      MessageRepository
 	autoReply AutoReplyHandler
+	enricher  MessageEnricher
+	tokenFunc func(context.Context) (string, error)
 }
 
 func NewEventHandler(cfg config.Config, logger *slog.Logger, redisClient *redis.Client, repo MessageRepository) *EventHandler {
@@ -44,6 +50,11 @@ func NewEventHandler(cfg config.Config, logger *slog.Logger, redisClient *redis.
 
 func (h *EventHandler) SetAutoReply(handler AutoReplyHandler) {
 	h.autoReply = handler
+}
+
+func (h *EventHandler) SetMessageEnricher(enricher MessageEnricher, tokenFunc func(context.Context) (string, error)) {
+	h.enricher = enricher
+	h.tokenFunc = tokenFunc
 }
 
 func (h *EventHandler) Handle(c *gin.Context) {
@@ -121,6 +132,7 @@ func (h *EventHandler) ProcessEnvelope(ctx context.Context, envelope EventEnvelo
 			h.logger.Warn("parse message event", "event_id", envelope.Header.EventID, "error", err)
 		}
 		if ok {
+			msg = h.enrichMessage(ctx, msg)
 			if err := h.repo.SaveMessage(ctx, msg); err != nil {
 				return ProcessResult{StatusCode: http.StatusInternalServerError}, fmt.Errorf("save message failed: %w", err)
 			}
@@ -131,6 +143,18 @@ func (h *EventHandler) ProcessEnvelope(ctx context.Context, envelope EventEnvelo
 	}
 
 	return ProcessResult{StatusCode: http.StatusOK}, nil
+}
+
+func (h *EventHandler) enrichMessage(ctx context.Context, msg message.Message) message.Message {
+	if h.enricher == nil || h.tokenFunc == nil {
+		return msg
+	}
+	token, err := h.tokenFunc(ctx)
+	if err != nil {
+		h.logger.Warn("load token for message media enrichment", "message_id", msg.FeishuMessageID, "error", err)
+		return msg
+	}
+	return h.enricher.EnrichMessage(ctx, token, msg)
 }
 
 func (h *EventHandler) decodeBody(rawBody []byte) ([]byte, error) {

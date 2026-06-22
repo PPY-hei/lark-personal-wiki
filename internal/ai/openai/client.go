@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,9 @@ type Client struct {
 	baseURL          string
 	apiKey           string
 	model            string
+	visionBaseURL    string
+	visionAPIKey     string
+	visionModel      string
 	embeddingBaseURL string
 	embeddingAPIKey  string
 	embeddingModel   string
@@ -23,9 +27,20 @@ type Client struct {
 }
 
 func NewClient(baseURL string, apiKey string, model string, embeddingBaseURL string, embeddingAPIKey string, embeddingModel string, embeddingDims int) *Client {
+	return NewClientWithVision(baseURL, apiKey, model, embeddingBaseURL, embeddingAPIKey, embeddingModel, embeddingDims, "", "", "")
+}
+
+func NewClientWithVision(baseURL string, apiKey string, model string, embeddingBaseURL string, embeddingAPIKey string, embeddingModel string, embeddingDims int, visionBaseURL string, visionAPIKey string, visionModel string) *Client {
 	baseURL = normalizeBaseURL(baseURL)
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
+	}
+	visionBaseURL = normalizeBaseURL(visionBaseURL)
+	if visionBaseURL == "" {
+		visionBaseURL = baseURL
+	}
+	if visionAPIKey == "" {
+		visionAPIKey = apiKey
 	}
 	embeddingBaseURL = normalizeBaseURL(embeddingBaseURL)
 	if embeddingBaseURL == "" {
@@ -37,6 +52,9 @@ func NewClient(baseURL string, apiKey string, model string, embeddingBaseURL str
 	if model == "" {
 		model = "gpt-5.5"
 	}
+	if visionModel == "" {
+		visionModel = model
+	}
 	if embeddingModel == "" {
 		embeddingModel = "text-embedding-3-small"
 	}
@@ -47,6 +65,9 @@ func NewClient(baseURL string, apiKey string, model string, embeddingBaseURL str
 		baseURL:          baseURL,
 		apiKey:           apiKey,
 		model:            model,
+		visionBaseURL:    visionBaseURL,
+		visionAPIKey:     visionAPIKey,
+		visionModel:      visionModel,
 		embeddingBaseURL: embeddingBaseURL,
 		embeddingAPIKey:  embeddingAPIKey,
 		embeddingModel:   embeddingModel,
@@ -156,6 +177,75 @@ func (c *Client) GenerateAnswer(ctx context.Context, question string, contextTex
 	return "", fmt.Errorf("response missing output text")
 }
 
+func (c *Client) DescribeImage(ctx context.Context, mimeType string, imageBytes []byte, hint string) (string, error) {
+	if c.visionAPIKey == "" {
+		return "", fmt.Errorf("VISION_API_KEY or OPENAI_API_KEY is required")
+	}
+	if len(imageBytes) == 0 {
+		return "", fmt.Errorf("image bytes are required")
+	}
+	dataURL := "data:" + firstNonEmpty(mimeType, "image/jpeg") + ";base64," + base64Encode(imageBytes)
+	prompt := `请理解这张飞书聊天图片，输出可用于知识库检索的中文文本。
+
+要求：
+1. 如果图片里有文字，完整提取 OCR 文本。
+2. 描述图片中的关键对象、界面、错误信息、配置、表格、数字和结论。
+3. 如果是截图，说明它像是什么系统或页面，以及可见的状态。
+4. 不要编造看不见的信息。
+5. 输出格式固定为：
+OCR文本：
+...
+
+图片描述：
+...
+
+关键信息：
+...`
+	if strings.TrimSpace(hint) != "" {
+		prompt += "\n\n聊天上下文提示：\n" + strings.TrimSpace(hint)
+	}
+	body, err := json.Marshal(map[string]any{
+		"model": c.visionModel,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": prompt},
+					{"type": "image_url", "image_url": map[string]any{"url": dataURL}},
+				},
+			},
+		},
+		"max_tokens": 1000,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal vision request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.visionBaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create vision request: %w", err)
+	}
+	c.setHeaders(req, c.visionAPIKey)
+
+	var payload struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error apiError `json:"error"`
+	}
+	if err := c.do(req, &payload); err != nil {
+		return "", err
+	}
+	if payload.Error.Message != "" {
+		return "", fmt.Errorf("vision failed: %s", payload.Error.Message)
+	}
+	if len(payload.Choices) == 0 || strings.TrimSpace(payload.Choices[0].Message.Content) == "" {
+		return "", fmt.Errorf("vision response missing content")
+	}
+	return strings.TrimSpace(payload.Choices[0].Message.Content), nil
+}
+
 func (c *Client) setHeaders(req *http.Request, apiKey string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -183,6 +273,19 @@ func (c *Client) do(req *http.Request, target any) error {
 type apiError struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
+}
+
+func base64Encode(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func buildPrompt(question string, contextText string) string {

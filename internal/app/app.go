@@ -14,6 +14,7 @@ import (
 	"feishu-kb-assistant/internal/infra/postgres"
 	redisinfra "feishu-kb-assistant/internal/infra/redis"
 	"feishu-kb-assistant/internal/knowledge"
+	"feishu-kb-assistant/internal/media"
 	"feishu-kb-assistant/internal/message"
 	"feishu-kb-assistant/internal/source"
 
@@ -54,7 +55,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	messageRepo := message.NewRepository(db)
 	authRepo := auth.NewRepository(db)
 	sourceRepo := source.NewRepository(db)
-	openaiClient := openai.NewClient(
+	openaiClient := openai.NewClientWithVision(
 		cfg.OpenAIBaseURL,
 		cfg.OpenAIAPIKey,
 		cfg.OpenAIModel,
@@ -62,12 +63,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		cfg.OpenAIEmbeddingAPIKey,
 		cfg.OpenAIEmbeddingModel,
 		cfg.OpenAIEmbeddingDims,
+		cfg.VisionBaseURL,
+		cfg.VisionAPIKey,
+		cfg.VisionModel,
 	)
 	knowledgeService := knowledge.NewService(db, openaiClient, cfg.OpenAIEnableEmbeddings)
+	mediaEnricher := media.NewEnricher(logger, cfg.VisionEnabled, feishuClient, openaiClient, cfg.VisionMaxImageBytes)
 	eventHandler := feishu.NewEventHandler(cfg, logger, redisClient, messageRepo)
+	eventHandler.SetMessageEnricher(mediaEnricher, feishuClient.TenantAccessToken)
 	autoReplyService := autoreply.New(logger, authRepo, messageRepo, sourceRepo, feishuClient, knowledgeService)
 	eventHandler.SetAutoReply(autoReplyService)
-	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService)
+	router := httpapi.NewRouter(cfg, logger, db, redisClient, feishuClient, eventHandler, messageRepo, knowledgeService, mediaEnricher)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	if cfg.FeishuTokenRefreshEnabled {
@@ -91,6 +97,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			cfg.FeishuP2PPollInterval,
 			cfg.FeishuP2PPollLookback,
 		)
+		p2pPoller.SetMessageEnricher(mediaEnricher)
 		go p2pPoller.Start(runCtx)
 	}
 	if shouldStartWebSocket(cfg.FeishuEventMode) {

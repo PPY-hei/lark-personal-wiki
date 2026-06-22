@@ -43,6 +43,11 @@ type Config struct {
 	OpenAIEmbeddingDims    int
 	OpenAIEnableEmbeddings bool
 	OpenAIWireAPI          string
+	VisionEnabled          bool
+	VisionBaseURL          string
+	VisionAPIKey           string
+	VisionModel            string
+	VisionMaxImageBytes    int
 }
 
 func Load() (Config, error) {
@@ -55,6 +60,10 @@ func Load() (Config, error) {
 	embeddingDims, err := strconv.Atoi(getenv("OPENAI_EMBEDDING_DIMENSIONS", "1536"))
 	if err != nil {
 		return Config{}, errors.New("OPENAI_EMBEDDING_DIMENSIONS must be an integer")
+	}
+	visionMaxImageBytes, err := strconv.Atoi(getenv("VISION_MAX_IMAGE_BYTES", "10485760"))
+	if err != nil {
+		return Config{}, errors.New("VISION_MAX_IMAGE_BYTES must be an integer")
 	}
 	p2pPollInterval, err := parseDurationEnv("FEISHU_P2P_POLL_INTERVAL", "60s")
 	if err != nil {
@@ -104,6 +113,11 @@ func Load() (Config, error) {
 		OpenAIEmbeddingDims:        embeddingDims,
 		OpenAIEnableEmbeddings:     getenv("OPENAI_ENABLE_EMBEDDINGS", "false") == "true",
 		OpenAIWireAPI:              getenv("OPENAI_WIRE_API", getenv("wire_api", "responses")),
+		VisionEnabled:              getenv("VISION_ENABLED", "true") == "true",
+		VisionBaseURL:              getenv("VISION_BASE_URL", getenv("OPENAI_BASE_URL", getenv("base_url", "https://api.openai.com/v1"))),
+		VisionAPIKey:               getenv("VISION_API_KEY", getenv("OPENAI_API_KEY", "")),
+		VisionModel:                getenv("VISION_MODEL", getenv("OPENAI_MODEL", getenv("model", "gpt-5.5"))),
+		VisionMaxImageBytes:        visionMaxImageBytes,
 	}, nil
 }
 

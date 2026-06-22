@@ -24,12 +24,17 @@ type P2PMessageRepository interface {
 	SaveMessageIfNew(ctx context.Context, msg message.Message) (bool, error)
 }
 
+type P2PMessageEnricher interface {
+	EnrichMessage(ctx context.Context, accessToken string, msg message.Message) message.Message
+}
+
 type P2PPoller struct {
 	logger   *slog.Logger
 	authRepo AuthRepository
 	feishu   P2PFeishuClient
 	source   P2PSourceRepository
 	messages P2PMessageRepository
+	enricher P2PMessageEnricher
 	replier  *Service
 	interval time.Duration
 	lookback time.Duration
@@ -64,6 +69,10 @@ func NewP2PPoller(
 		interval: interval,
 		lookback: lookback,
 	}
+}
+
+func (p *P2PPoller) SetMessageEnricher(enricher P2PMessageEnricher) {
+	p.enricher = enricher
 }
 
 func (p *P2PPoller) Start(ctx context.Context) {
@@ -164,6 +173,9 @@ func (p *P2PPoller) pollContact(ctx context.Context, accessToken string, contact
 			RawContent:      item.RawContent,
 			RawPayload:      item.RawPayload,
 			SentAt:          item.SentAt,
+		}
+		if p.enricher != nil {
+			msg = p.enricher.EnrichMessage(ctx, accessToken, msg)
 		}
 		inserted, err := p.messages.SaveMessageIfNew(ctx, msg)
 		if err != nil {
