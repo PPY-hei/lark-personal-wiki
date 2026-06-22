@@ -61,7 +61,7 @@ func (c *Client) OAuthAuthorizeURL(state string) string {
 		"contact:department.base:readonly",
 		"contact:department.organize:readonly",
 		"contact:user.base:readonly",
-		"contact:user.search",
+		"contact:user:search",
 	}, " "))
 	return c.accountsBaseURL() + "/open-apis/authen/v1/authorize?" + values.Encode()
 }
