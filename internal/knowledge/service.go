@@ -125,9 +125,28 @@ func (s *Service) Retrieve(ctx context.Context, question string, limit int) ([]R
 		if err != nil {
 			return nil, err
 		}
-		return s.SearchByEmbedding(ctx, embedding, limit)
+		return s.SearchHybrid(ctx, question, embedding, limit)
 	}
 	return s.SearchByText(ctx, question, limit)
+}
+
+func (s *Service) SearchHybrid(ctx context.Context, question string, embedding []float32, limit int) ([]RetrievedChunk, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+	embeddingItems, err := s.SearchByEmbedding(ctx, embedding, limit)
+	if err != nil {
+		return nil, err
+	}
+	textItems, err := s.SearchByText(ctx, question, limit)
+	if err != nil {
+		return nil, err
+	}
+	items := mergeRetrievedChunks(limit, textItems, embeddingItems)
+	if len(items) > 0 {
+		return items, nil
+	}
+	return nil, nil
 }
 
 func (s *Service) SearchByEmbedding(ctx context.Context, embedding []float32, limit int) ([]RetrievedChunk, error) {
@@ -162,6 +181,7 @@ func (s *Service) SearchByText(ctx context.Context, question string, limit int) 
 	if strings.TrimSpace(query) == "" {
 		query = question
 	}
+	likePatterns := keywordLikePatterns(keywords)
 	rows, err := s.db.Query(ctx, `
 		WITH q AS (
 			SELECT websearch_to_tsquery('simple', $1) AS tsq
@@ -176,14 +196,18 @@ func (s *Service) SearchByText(ctx context.Context, question string, limit int) 
 			kc.content,
 			kc.metadata,
 			kc.created_at,
-		       ts_rank_cd(to_tsvector('simple', kc.content), q.tsq) AS score
+			(
+				ts_rank_cd(to_tsvector('simple', kc.content), q.tsq) +
+				CASE WHEN $3::text[] IS NOT NULL AND kc.content ILIKE ANY($3::text[]) THEN 1 ELSE 0 END
+			) AS score
 		FROM knowledge_chunks kc
 		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
 		CROSS JOIN q
 		WHERE to_tsvector('simple', kc.content) @@ q.tsq
+		   OR ($3::text[] IS NOT NULL AND kc.content ILIKE ANY($3::text[]))
 		ORDER BY score DESC, kc.updated_at DESC
 		LIMIT $2
-	`, query, limit)
+	`, query, limit, likePatterns)
 	if err != nil {
 		return nil, fmt.Errorf("text search chunks: %w", err)
 	}
@@ -197,6 +221,27 @@ func (s *Service) SearchByText(ctx context.Context, question string, limit int) 
 		return items, nil
 	}
 	return s.SearchRecent(ctx, limit)
+}
+
+func mergeRetrievedChunks(limit int, groups ...[]RetrievedChunk) []RetrievedChunk {
+	if limit <= 0 {
+		limit = 8
+	}
+	seen := make(map[int64]bool)
+	items := make([]RetrievedChunk, 0, limit)
+	for _, group := range groups {
+		for _, item := range group {
+			if seen[item.ID] {
+				continue
+			}
+			seen[item.ID] = true
+			items = append(items, item)
+			if len(items) >= limit {
+				return items
+			}
+		}
+	}
+	return items
 }
 
 func (s *Service) SearchRecent(ctx context.Context, limit int) ([]RetrievedChunk, error) {
@@ -481,25 +526,48 @@ func replaceLineExact(text string, oldLine string, newLine string) string {
 }
 
 var keywordPattern = regexp.MustCompile(`[\p{Han}A-Za-z0-9_./:-]+`)
+var asciiKeywordPattern = regexp.MustCompile(`[A-Za-z0-9_./:-]+`)
 
 func extractKeywords(question string) []string {
 	raw := keywordPattern.FindAllString(question, -1)
 	seen := make(map[string]bool)
 	keywords := make([]string, 0, len(raw))
 	for _, item := range raw {
-		item = strings.TrimSpace(item)
-		if len([]rune(item)) < 2 {
-			continue
+		keywords = appendKeyword(keywords, seen, item)
+		for _, ascii := range asciiKeywordPattern.FindAllString(item, -1) {
+			keywords = appendKeyword(keywords, seen, ascii)
 		}
-		key := strings.ToLower(item)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		keywords = append(keywords, item)
 	}
 	if len(keywords) > 8 {
 		return keywords[:8]
 	}
 	return keywords
+}
+
+func appendKeyword(keywords []string, seen map[string]bool, item string) []string {
+	item = strings.TrimSpace(item)
+	if len([]rune(item)) < 2 {
+		return keywords
+	}
+	key := strings.ToLower(item)
+	if seen[key] {
+		return keywords
+	}
+	seen[key] = true
+	return append(keywords, item)
+}
+
+func keywordLikePatterns(keywords []string) []string {
+	patterns := make([]string, 0, len(keywords))
+	for _, keyword := range keywords {
+		keyword = strings.TrimSpace(keyword)
+		if keyword == "" {
+			continue
+		}
+		patterns = append(patterns, "%"+keyword+"%")
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+	return patterns
 }

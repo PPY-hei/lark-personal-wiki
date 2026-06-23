@@ -46,3 +46,36 @@ func TestExpandSourceReferencesFillsBareColonLine(t *testing.T) {
 		t.Fatalf("expanded answer missing %q: %s", want, got)
 	}
 }
+
+func TestMergeRetrievedChunksPrefersTextResults(t *testing.T) {
+	textItems := []RetrievedChunk{{ID: 2, Content: "hive jdbc"}, {ID: 3, Content: "password"}}
+	embeddingItems := []RetrievedChunk{{ID: 1, Content: "semantic"}, {ID: 2, Content: "hive jdbc"}}
+
+	got := mergeRetrievedChunks(3, textItems, embeddingItems)
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	for i, wantID := range []int64{2, 3, 1} {
+		if got[i].ID != wantID {
+			t.Fatalf("got[%d].ID = %d, want %d", i, got[i].ID, wantID)
+		}
+	}
+}
+
+func TestKeywordLikePatterns(t *testing.T) {
+	got := keywordLikePatterns([]string{"hive", "jdbc_path", "100%"})
+	want := []string{"%hive%", "%jdbc_path%", "%100%%"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("patterns = %#v, want %#v", got, want)
+	}
+}
+
+func TestExtractKeywordsAddsASCIIWordsFromMixedText(t *testing.T) {
+	got := extractKeywords("hive的jdbc路径")
+	joined := strings.Join(got, "|")
+	for _, want := range []string{"hive", "jdbc"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("keywords = %#v, missing %q", got, want)
+		}
+	}
+}
