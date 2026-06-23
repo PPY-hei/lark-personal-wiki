@@ -58,12 +58,23 @@ type unitCandidate struct {
 	MessageIDs   []int64
 }
 
+type DocumentInput struct {
+	Token   string
+	Type    string
+	Title   string
+	URL     string
+	Content string
+}
+
 const sourceDisplayNameSQL = `
 			coalesce(
 				nullif(c.name, ''),
 				CASE
 					WHEN nullif(ct.name, '') IS NOT NULL THEN
 						coalesce(nullif(au.name, ''), nullif(au.open_id, ''), nullif(au.user_id, ''), '授权用户') || ' 与 ' || ct.name || ' 的私聊'
+				END,
+				CASE
+					WHEN kc.metadata->>'document_title' IS NOT NULL THEN '云文档：' || (kc.metadata->>'document_title')
 				END,
 				kc.metadata->>'feishu_chat_id',
 				kc.source_id
@@ -85,6 +96,12 @@ const sourceDisplayJoinsSQL = `
 			ORDER BY created_at DESC
 			LIMIT 1
 		) au ON true`
+
+const sourceDisplayDateSQL = `
+				CASE
+					WHEN kc.metadata->>'document_title' IS NOT NULL THEN to_char(kc.updated_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')
+					ELSE coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD'))
+				END`
 
 func NewService(db *pgxpool.Pool, ai AIClient, useEmbeddings bool) *Service {
 	return &Service{db: db, ai: ai, useEmbeddings: useEmbeddings}
@@ -123,6 +140,42 @@ func (s *Service) BuildIndex(ctx context.Context, days int) (IndexResult, error)
 			}
 			result.Chunks++
 		}
+	}
+	return result, nil
+}
+
+func (s *Service) IndexDocument(ctx context.Context, doc DocumentInput) (IndexResult, error) {
+	doc.Token = strings.TrimSpace(doc.Token)
+	doc.Type = strings.TrimSpace(doc.Type)
+	doc.Title = strings.TrimSpace(doc.Title)
+	doc.Content = strings.TrimSpace(doc.Content)
+	if doc.Token == "" || doc.Type == "" {
+		return IndexResult{}, fmt.Errorf("document token and type are required")
+	}
+	if doc.Title == "" {
+		doc.Title = doc.Token
+	}
+	if doc.Content == "" {
+		return IndexResult{}, fmt.Errorf("document content is empty")
+	}
+	unitID, sourceID, err := s.upsertDocumentUnit(ctx, doc)
+	if err != nil {
+		return IndexResult{}, err
+	}
+	result := IndexResult{Units: 1}
+	chunks := splitContent(doc.Content, 3200, 400)
+	for idx, content := range chunks {
+		var embedding []float32
+		if s.useEmbeddings {
+			embedding, err = s.ai.Embed(ctx, content)
+			if err != nil {
+				return result, fmt.Errorf("embed document chunk %s:%d: %w", sourceID, idx, err)
+			}
+		}
+		if err := s.upsertDocumentChunk(ctx, unitID, sourceID, idx, content, embedding, doc); err != nil {
+			return result, err
+		}
+		result.Chunks++
 	}
 	return result, nil
 }
@@ -224,7 +277,7 @@ func (s *Service) SearchByEmbedding(ctx context.Context, embedding []float32, li
 			kc.source_type,
 			kc.source_id,
 `+sourceDisplayNameSQL+` || ' / ' ||
-				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
+`+sourceDisplayDateSQL+` || ' / 片段 ' ||
 				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
 			kc.content,
 			kc.metadata,
@@ -261,7 +314,7 @@ func (s *Service) SearchByText(ctx context.Context, question string, keywords []
 			kc.source_type,
 			kc.source_id,
 `+sourceDisplayNameSQL+` || ' / ' ||
-				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
+`+sourceDisplayDateSQL+` || ' / 片段 ' ||
 				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
 			kc.content,
 			kc.metadata,
@@ -321,7 +374,7 @@ func (s *Service) SearchRecent(ctx context.Context, limit int) ([]RetrievedChunk
 			kc.source_type,
 			kc.source_id,
 `+sourceDisplayNameSQL+` || ' / ' ||
-				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
+`+sourceDisplayDateSQL+` || ' / 片段 ' ||
 				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
 			kc.content,
 			kc.metadata,
@@ -464,6 +517,69 @@ func (s *Service) upsertChunk(ctx context.Context, unitID int64, unitSourceID st
 			updated_at = now()
 	`, sourceID, unit.FeishuChatID, content, embeddingValue, estimateTokens(content), metadata); err != nil {
 		return fmt.Errorf("upsert knowledge chunk: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) upsertDocumentUnit(ctx context.Context, doc DocumentInput) (int64, string, error) {
+	sourceID := "doc:" + doc.Type + ":" + doc.Token
+	metadata, _ := json.Marshal(map[string]any{
+		"document_token": doc.Token,
+		"document_type":  doc.Type,
+		"document_title": doc.Title,
+		"document_url":   doc.URL,
+	})
+	var id int64
+	err := s.db.QueryRow(ctx, `
+		INSERT INTO knowledge_units (source_type, source_id, title, content, metadata, updated_at)
+		VALUES ('cloud_document', $1, $2, $3, $4, now())
+		ON CONFLICT (source_type, source_id) DO UPDATE SET
+			title = EXCLUDED.title,
+			content = EXCLUDED.content,
+			metadata = EXCLUDED.metadata,
+			updated_at = now()
+		RETURNING id
+	`, sourceID, doc.Title, doc.Content, metadata).Scan(&id)
+	if err != nil {
+		return 0, "", fmt.Errorf("upsert document unit: %w", err)
+	}
+	return id, sourceID, nil
+}
+
+func (s *Service) upsertDocumentChunk(ctx context.Context, unitID int64, unitSourceID string, index int, content string, embedding []float32, doc DocumentInput) error {
+	sourceID := fmt.Sprintf("%s:%03d", unitSourceID, index)
+	metadata, _ := json.Marshal(map[string]any{
+		"knowledge_unit_id": unitID,
+		"chunk_index":       index,
+		"document_token":    doc.Token,
+		"document_type":     doc.Type,
+		"document_title":    doc.Title,
+		"document_url":      doc.URL,
+	})
+	embeddingValue := any(nil)
+	if len(embedding) > 0 {
+		embeddingValue = vectorLiteral(embedding)
+	}
+	if _, err := s.db.Exec(ctx, `
+		INSERT INTO knowledge_chunks (source_type, source_id, content, embedding, token_count, metadata, visibility_scope, updated_at)
+		VALUES (
+			'cloud_document',
+			$1,
+			$2,
+			CASE WHEN $3::text IS NULL THEN NULL ELSE $3::vector END,
+			$4,
+			$5,
+			'current_chat',
+			now()
+		)
+		ON CONFLICT (source_type, source_id) DO UPDATE SET
+			content = EXCLUDED.content,
+			embedding = EXCLUDED.embedding,
+			token_count = EXCLUDED.token_count,
+			metadata = EXCLUDED.metadata,
+			updated_at = now()
+	`, sourceID, content, embeddingValue, estimateTokens(content), metadata); err != nil {
+		return fmt.Errorf("upsert document chunk: %w", err)
 	}
 	return nil
 }

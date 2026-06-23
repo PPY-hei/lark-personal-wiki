@@ -62,6 +62,9 @@ func (c *Client) OAuthAuthorizeURL(state string) string {
 		"contact:department.organize:readonly",
 		"contact:user.base:readonly",
 		"contact:user:search",
+		"docx:document:readonly",
+		"drive:drive.metadata:readonly",
+		"search:docs:read",
 	}, " "))
 	return c.accountsBaseURL() + "/open-apis/authen/v1/authorize?" + values.Encode()
 }
@@ -697,6 +700,120 @@ func (c *Client) SearchUsers(ctx context.Context, userAccessToken string, query 
 	}
 
 	return contacts, nil
+}
+
+func (c *Client) SearchDocuments(ctx context.Context, userAccessToken string, query string) ([]source.RemoteDocument, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("document query is required")
+	}
+	reqBody, err := json.Marshal(map[string]any{
+		"search_key": query,
+		"count":      50,
+		"offset":     0,
+		"docs_types": []string{"docx", "doc", "sheet", "bitable", "mindnote", "file"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal document search request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/open-apis/suite/docs-api/search/object", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create document search request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+userAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	var payload struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			DocsEntities []json.RawMessage `json:"docs_entities"`
+			Items        []json.RawMessage `json:"items"`
+		} `json:"data"`
+	}
+	if err := c.doJSON(req, &payload); err != nil {
+		return nil, err
+	}
+	if payload.Code != 0 {
+		return nil, fmt.Errorf("search documents failed: code=%d msg=%s", payload.Code, payload.Msg)
+	}
+	rawItems := payload.Data.DocsEntities
+	if len(rawItems) == 0 {
+		rawItems = payload.Data.Items
+	}
+	items := make([]source.RemoteDocument, 0, len(rawItems))
+	for _, raw := range rawItems {
+		doc, err := parseDocumentSearchItem(raw)
+		if err != nil {
+			return nil, err
+		}
+		if doc.Token != "" && doc.Type != "" {
+			items = append(items, doc)
+		}
+	}
+	return items, nil
+}
+
+func (c *Client) GetDocumentRawContent(ctx context.Context, userAccessToken string, documentID string) (string, error) {
+	documentID = strings.TrimSpace(documentID)
+	if documentID == "" {
+		return "", fmt.Errorf("document id is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/open-apis/docx/v1/documents/"+url.PathEscape(documentID)+"/raw_content", nil)
+	if err != nil {
+		return "", fmt.Errorf("create document raw content request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+userAccessToken)
+
+	var payload struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Content    string `json:"content"`
+			RawContent string `json:"raw_content"`
+			Text       string `json:"text"`
+		} `json:"data"`
+	}
+	if err := c.doJSON(req, &payload); err != nil {
+		return "", err
+	}
+	if payload.Code != 0 {
+		return "", fmt.Errorf("get document raw content failed: code=%d msg=%s", payload.Code, payload.Msg)
+	}
+	content := firstNonEmpty(payload.Data.Content, payload.Data.RawContent, payload.Data.Text)
+	if strings.TrimSpace(content) == "" {
+		return "", fmt.Errorf("document raw content is empty")
+	}
+	return strings.TrimSpace(content), nil
+}
+
+func parseDocumentSearchItem(raw json.RawMessage) (source.RemoteDocument, error) {
+	var item struct {
+		DocsToken string `json:"docs_token"`
+		DocsType  string `json:"docs_type"`
+		Token     string `json:"token"`
+		Type      string `json:"type"`
+		Title     string `json:"title"`
+		URL       string `json:"url"`
+		OwnerID   string `json:"owner_id"`
+		Owner     struct {
+			OwnerID string `json:"owner_id"`
+			ID      string `json:"id"`
+		} `json:"owner"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return source.RemoteDocument{}, fmt.Errorf("decode document search item: %w", err)
+	}
+	token := firstNonEmpty(item.DocsToken, item.Token)
+	docsType := firstNonEmpty(item.DocsType, item.Type)
+	return source.RemoteDocument{
+		Token:      token,
+		Type:       docsType,
+		Title:      firstNonEmpty(item.Title, token),
+		OwnerID:    firstNonEmpty(item.OwnerID, item.Owner.OwnerID, item.Owner.ID),
+		URL:        item.URL,
+		RawPayload: raw,
+	}, nil
 }
 
 func (c *Client) doJSON(req *http.Request, target any) error {

@@ -26,6 +26,24 @@ type RemoteContact struct {
 	RawPayload json.RawMessage `json:"raw_payload,omitempty"`
 }
 
+type RemoteDocument struct {
+	Token      string          `json:"token"`
+	Type       string          `json:"type"`
+	Title      string          `json:"title"`
+	OwnerID    string          `json:"owner_id"`
+	URL        string          `json:"url"`
+	Selected   bool            `json:"selected"`
+	RawPayload json.RawMessage `json:"raw_payload,omitempty"`
+}
+
+type DocumentContent struct {
+	Token   string `json:"token"`
+	Type    string `json:"type"`
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Content string `json:"content"`
+}
+
 type RemoteMessage struct {
 	MessageID   string          `json:"message_id"`
 	ChatID      string          `json:"chat_id"`

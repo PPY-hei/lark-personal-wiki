@@ -286,3 +286,118 @@ func (r *Repository) IsSelectedContactChat(ctx context.Context, chatID string) (
 	}
 	return exists, nil
 }
+
+func (r *Repository) CacheDocuments(ctx context.Context, items []RemoteDocument) error {
+	for _, item := range items {
+		if item.Token == "" || item.Type == "" {
+			continue
+		}
+		if item.Title == "" {
+			item.Title = item.Token
+		}
+		if _, err := r.db.Exec(ctx, `
+			INSERT INTO cloud_documents (docs_token, docs_type, title, owner_id, url, selected, raw_payload)
+			VALUES ($1, $2, $3, $4, $5, false, $6)
+			ON CONFLICT (docs_token, docs_type) DO UPDATE SET
+				title = EXCLUDED.title,
+				owner_id = EXCLUDED.owner_id,
+				url = EXCLUDED.url,
+				raw_payload = EXCLUDED.raw_payload,
+				updated_at = now()
+		`, item.Token, item.Type, item.Title, item.OwnerID, item.URL, item.RawPayload); err != nil {
+			return fmt.Errorf("cache document %s/%s: %w", item.Type, item.Token, err)
+		}
+	}
+	return nil
+}
+
+func (r *Repository) SaveSelectedDocuments(ctx context.Context, items []RemoteDocument) error {
+	if _, err := r.db.Exec(ctx, `UPDATE cloud_documents SET selected=false, updated_at=now()`); err != nil {
+		return fmt.Errorf("clear selected documents: %w", err)
+	}
+	for _, item := range items {
+		if item.Token == "" || item.Type == "" {
+			continue
+		}
+		if item.Title == "" {
+			item.Title = item.Token
+		}
+		if _, err := r.db.Exec(ctx, `
+			INSERT INTO cloud_documents (docs_token, docs_type, title, owner_id, url, selected, raw_payload)
+			VALUES ($1, $2, $3, $4, $5, true, $6)
+			ON CONFLICT (docs_token, docs_type) DO UPDATE SET
+				title = EXCLUDED.title,
+				owner_id = EXCLUDED.owner_id,
+				url = EXCLUDED.url,
+				selected = true,
+				raw_payload = EXCLUDED.raw_payload,
+				updated_at = now()
+		`, item.Token, item.Type, item.Title, item.OwnerID, item.URL, item.RawPayload); err != nil {
+			return fmt.Errorf("save selected document %s/%s: %w", item.Type, item.Token, err)
+		}
+	}
+	return nil
+}
+
+func (r *Repository) ListCachedDocuments(ctx context.Context) ([]RemoteDocument, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT docs_token, docs_type, title, COALESCE(owner_id, ''), COALESCE(url, ''), selected
+		FROM cloud_documents
+		ORDER BY selected DESC, updated_at DESC, id DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list cached documents: %w", err)
+	}
+	defer rows.Close()
+	return scanDocuments(rows)
+}
+
+func (r *Repository) ListSelectedDocuments(ctx context.Context) ([]RemoteDocument, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT docs_token, docs_type, title, COALESCE(owner_id, ''), COALESCE(url, ''), selected
+		FROM cloud_documents
+		WHERE selected=true
+		ORDER BY updated_at DESC, id DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list selected documents: %w", err)
+	}
+	defer rows.Close()
+	return scanDocuments(rows)
+}
+
+func (r *Repository) SaveDocumentSyncResult(ctx context.Context, docsType string, token string, syncErr error) error {
+	errText := ""
+	if syncErr != nil {
+		errText = syncErr.Error()
+	}
+	if _, err := r.db.Exec(ctx, `
+		UPDATE cloud_documents
+		SET last_synced_at = CASE WHEN NULLIF($3, '') IS NULL THEN now() ELSE last_synced_at END,
+			last_sync_error = NULLIF($3, ''),
+			updated_at = now()
+		WHERE docs_type=$1 AND docs_token=$2
+	`, docsType, token, errText); err != nil {
+		return fmt.Errorf("save document sync result: %w", err)
+	}
+	return nil
+}
+
+func scanDocuments(rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}) ([]RemoteDocument, error) {
+	items := make([]RemoteDocument, 0)
+	for rows.Next() {
+		var item RemoteDocument
+		if err := rows.Scan(&item.Token, &item.Type, &item.Title, &item.OwnerID, &item.URL, &item.Selected); err != nil {
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate documents: %w", err)
+	}
+	return items, nil
+}

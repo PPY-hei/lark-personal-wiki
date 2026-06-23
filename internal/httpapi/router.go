@@ -414,6 +414,127 @@ func NewRouter(
 		c.JSON(http.StatusOK, gin.H{"ok": true, "count": len(req.Items)})
 	})
 
+	admin.GET("/source/documents", func(c *gin.Context) {
+		if c.Query("local") == "true" {
+			items, err := sourceRepo.ListCachedDocuments(c.Request.Context())
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"items": items})
+			return
+		}
+		query := strings.TrimSpace(c.Query("q"))
+		if query == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请输入云文档关键词"})
+			return
+		}
+		session, err := authRepo.Latest(c.Request.Context())
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, pgx.ErrNoRows) {
+				status = http.StatusUnauthorized
+			}
+			c.JSON(status, gin.H{"error": "feishu user authorization required"})
+			return
+		}
+		items, err := feishuClient.SearchDocuments(c.Request.Context(), session.AccessToken, query)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		if err := sourceRepo.CacheDocuments(c.Request.Context(), items); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		cached, err := sourceRepo.ListCachedDocuments(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": cached})
+	})
+
+	admin.POST("/source/documents/select", func(c *gin.Context) {
+		var req struct {
+			Items []source.RemoteDocument `json:"items"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := sourceRepo.SaveSelectedDocuments(c.Request.Context(), req.Items); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "count": len(req.Items)})
+	})
+
+	admin.POST("/sync/documents", func(c *gin.Context) {
+		session, err := authRepo.Latest(c.Request.Context())
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, pgx.ErrNoRows) {
+				status = http.StatusUnauthorized
+			}
+			c.JSON(status, gin.H{"error": "feishu user authorization required"})
+			return
+		}
+		docs, err := sourceRepo.ListSelectedDocuments(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		type itemResult struct {
+			Token  string `json:"token"`
+			Type   string `json:"type"`
+			Title  string `json:"title"`
+			Chunks int    `json:"chunks,omitempty"`
+			Error  string `json:"error,omitempty"`
+		}
+		results := make([]itemResult, 0, len(docs))
+		synced := 0
+		chunks := 0
+		for _, doc := range docs {
+			result := itemResult{Token: doc.Token, Type: doc.Type, Title: doc.Title}
+			if doc.Type != "docx" {
+				err := errors.New("当前 MVP 仅支持新版文档 docx 纯文本解析")
+				_ = sourceRepo.SaveDocumentSyncResult(c.Request.Context(), doc.Type, doc.Token, err)
+				result.Error = err.Error()
+				results = append(results, result)
+				continue
+			}
+			ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+			content, err := feishuClient.GetDocumentRawContent(ctx, session.AccessToken, doc.Token)
+			cancel()
+			if err != nil {
+				_ = sourceRepo.SaveDocumentSyncResult(c.Request.Context(), doc.Type, doc.Token, err)
+				result.Error = err.Error()
+				results = append(results, result)
+				continue
+			}
+			indexResult, err := knowledgeService.IndexDocument(c.Request.Context(), knowledge.DocumentInput{
+				Token:   doc.Token,
+				Type:    doc.Type,
+				Title:   doc.Title,
+				URL:     doc.URL,
+				Content: content,
+			})
+			if err != nil {
+				_ = sourceRepo.SaveDocumentSyncResult(c.Request.Context(), doc.Type, doc.Token, err)
+				result.Error = err.Error()
+				results = append(results, result)
+				continue
+			}
+			_ = sourceRepo.SaveDocumentSyncResult(c.Request.Context(), doc.Type, doc.Token, nil)
+			result.Chunks = indexResult.Chunks
+			synced++
+			chunks += indexResult.Chunks
+			results = append(results, result)
+		}
+		c.JSON(http.StatusOK, gin.H{"synced": synced, "chunks": chunks, "items": results})
+	})
+
 	return router
 }
 
@@ -618,7 +739,7 @@ const adminHTML = `<!doctype html>
     .source-console { overflow: hidden; }
     .source-tabs {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
       gap: 0;
       padding: 8px;
       border-bottom: 1px solid var(--line);
@@ -837,8 +958,10 @@ const adminHTML = `<!doctype html>
         <div class="metric-grid">
           <div class="metric"><strong id="chatSelectedCount">0</strong><span>群组</span></div>
           <div class="metric"><strong id="contactSelectedCount">0</strong><span>联系人</span></div>
+          <div class="metric"><strong id="documentSelectedCount">0</strong><span>云文档</span></div>
           <div class="metric"><strong id="chatLoadedCount">0</strong><span>已加载群</span></div>
           <div class="metric"><strong id="contactLoadedCount">0</strong><span>已加载人</span></div>
+          <div class="metric"><strong id="documentLoadedCount">0</strong><span>已加载文档</span></div>
         </div>
       </section>
       <section class="panel side-card">
@@ -899,6 +1022,8 @@ const adminHTML = `<!doctype html>
           <button class="source-tab" id="tab-chatJoined" onclick="switchSourceView('chatJoined')">已加入群组 <span id="chatJoinedTabCount">0</span></button>
           <button class="source-tab" id="tab-contact" onclick="switchSourceView('contact')">联系人候选 <span id="contactTabCount">0</span></button>
           <button class="source-tab" id="tab-contactJoined" onclick="switchSourceView('contactJoined')">已加入联系人 <span id="contactJoinedTabCount">0</span></button>
+          <button class="source-tab" id="tab-document" onclick="switchSourceView('document')">云文档候选 <span id="documentTabCount">0</span></button>
+          <button class="source-tab" id="tab-documentJoined" onclick="switchSourceView('documentJoined')">已加入云文档 <span id="documentJoinedTabCount">0</span></button>
         </nav>
         <div class="source-view active" id="view-chat">
           <div class="toolbar">
@@ -999,6 +1124,57 @@ const adminHTML = `<!doctype html>
             </div>
           </div>
         </div>
+        <div class="source-view" id="view-document">
+          <div class="toolbar contact-toolbar">
+            <input id="documentRemoteQuery" placeholder="输入标题关键词搜索云文档" />
+            <input id="documentSearch" placeholder="筛选结果：标题 / Token / 类型" oninput="setSearch('document', this.value)" />
+            <select id="documentPageSize" onchange="setPageSize('document', this.value)">
+              <option value="10">每页 10</option>
+              <option value="20" selected>每页 20</option>
+              <option value="50">每页 50</option>
+            </select>
+            <button onclick="loadDocuments()">搜索云文档</button>
+            <button class="secondary" onclick="saveDocuments()">保存选中文档</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th><input type="checkbox" id="documentCheckAll" onchange="togglePage('document', this.checked)" /></th><th>标题</th><th>类型</th><th>Token</th><th>链接</th></tr></thead>
+              <tbody id="documentRows"><tr><td colspan="5" class="empty">输入标题关键词后搜索云文档。</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <div id="documentPageInfo">第 0 / 0 页</div>
+            <div class="pager-actions">
+              <button class="secondary" onclick="prevPage('document')">上一页</button>
+              <button class="secondary" onclick="nextPage('document')">下一页</button>
+            </div>
+          </div>
+        </div>
+        <div class="source-view" id="view-documentJoined">
+          <div class="joined-toolbar">
+            <input id="documentJoinedSearch" placeholder="搜索已加入云文档 / Token / 类型" oninput="setSearch('documentJoined', this.value)" />
+            <select id="documentJoinedPageSize" onchange="setPageSize('documentJoined', this.value)">
+              <option value="10">每页 10</option>
+              <option value="20" selected>每页 20</option>
+              <option value="50">每页 50</option>
+            </select>
+            <button onclick="syncDocuments()">同步云文档</button>
+            <button class="secondary" onclick="loadCachedDocuments(true)">刷新已加入云文档</button>
+          </div>
+          <div class="table-wrap">
+            <table class="joined-table">
+              <thead><tr><th>标题</th><th>类型</th><th>Token</th><th>链接</th></tr></thead>
+              <tbody id="documentJoinedRows"><tr><td colspan="4" class="empty">暂无已加入云文档。</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <div id="documentJoinedPageInfo">第 0 / 0 页</div>
+            <div class="pager-actions">
+              <button class="secondary" onclick="prevPage('documentJoined')">上一页</button>
+              <button class="secondary" onclick="nextPage('documentJoined')">下一页</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </main>
@@ -1007,7 +1183,8 @@ const adminHTML = `<!doctype html>
     const state = {
       activeSourceView: 'chat',
       chat: { items: [], joined: [], selected: new Set(), query: '', joinedQuery: '', page: 1, joinedPage: 1, pageSize: 20, joinedPageSize: 20 },
-      contact: { items: [], joined: [], selected: new Set(), query: '', joinedQuery: '', page: 1, joinedPage: 1, pageSize: 20, joinedPageSize: 20 }
+      contact: { items: [], joined: [], selected: new Set(), query: '', joinedQuery: '', page: 1, joinedPage: 1, pageSize: 20, joinedPageSize: 20 },
+      document: { items: [], joined: [], selected: new Set(), query: '', joinedQuery: '', page: 1, joinedPage: 1, pageSize: 20, joinedPageSize: 20 }
     };
 
     async function api(path, options) {
@@ -1076,7 +1253,7 @@ const adminHTML = `<!doctype html>
     async function loadContacts() {
       const query = document.getElementById('contactRemoteQuery').value.trim();
       if (!query) return toast('请输入姓名关键词');
-      setRows('contactRows', '<tr><td colspan="4" class="loading">正在拉取联系人...</td></tr>');
+      setRows('contactRows', '<tr><td colspan="5" class="loading">正在拉取联系人...</td></tr>');
       try {
         const data = await api('/api/admin/source/contacts?q=' + encodeURIComponent(query));
         state.contact.items = data.items || [];
@@ -1115,6 +1292,68 @@ const adminHTML = `<!doctype html>
         if (showMessage && state.contact.joined.length) toast('已恢复 ' + state.contact.joined.length + ' 个已加入联系人');
       } catch (err) {
         setRows('contactJoinedRows', '<tr><td colspan="4" class="error">' + escapeHtml(err.message) + '</td></tr>');
+      }
+    }
+
+    async function loadDocuments() {
+      const query = document.getElementById('documentRemoteQuery').value.trim();
+      if (!query) return toast('请输入云文档标题关键词');
+      setRows('documentRows', '<tr><td colspan="5" class="loading">正在搜索云文档...</td></tr>');
+      try {
+        const data = await api('/api/admin/source/documents?q=' + encodeURIComponent(query));
+        state.document.items = data.items || [];
+        restoreSelected('document');
+        state.document.page = 1;
+        renderSource('document');
+        toast('已加载 ' + state.document.items.length + ' 个云文档');
+      } catch (err) {
+        setRows('documentRows', '<tr><td colspan="5" class="error">' + escapeHtml(err.message) + '</td></tr>');
+      }
+      updateMetrics();
+    }
+
+    async function saveDocuments() {
+      const items = selectedItems('document');
+      if (!items.length) return toast('请选择云文档');
+      const result = await api('/api/admin/source/documents/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items })
+      });
+      await loadCachedDocuments(false);
+      switchSourceView('documentJoined');
+      toast('已保存 ' + result.count + ' 个云文档');
+    }
+
+    async function loadCachedDocuments(showMessage) {
+      try {
+        const data = await api('/api/admin/source/documents?local=true');
+        const items = data.items || [];
+        if (!state.document.items.length) state.document.items = items;
+        state.document.joined = items.filter(item => item.selected);
+        restoreSelected('document');
+        renderSource('document');
+        renderJoined('document');
+        if (showMessage && state.document.joined.length) toast('已恢复 ' + state.document.joined.length + ' 个已加入云文档');
+      } catch (err) {
+        setRows('documentJoinedRows', '<tr><td colspan="4" class="error">' + escapeHtml(err.message) + '</td></tr>');
+      }
+    }
+
+    async function syncDocuments() {
+      const resultBox = document.getElementById('indexResult');
+      resultBox.textContent = '正在同步已加入云文档...';
+      try {
+        const data = await api('/api/admin/sync/documents', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        resultBox.textContent = '已同步云文档 ' + data.synced + ' 个，写入片段 ' + data.chunks + ' 个。';
+        await loadCachedDocuments(false);
+        toast('云文档同步完成：' + data.synced + ' 个');
+      } catch (err) {
+        resultBox.textContent = err.message;
+        toast('云文档同步失败：' + err.message);
       }
     }
 
@@ -1218,7 +1457,7 @@ const adminHTML = `<!doctype html>
 
     function switchSourceView(view) {
       state.activeSourceView = view;
-      ['chat', 'chatJoined', 'contact', 'contactJoined'].forEach(item => {
+      ['chat', 'chatJoined', 'contact', 'contactJoined', 'document', 'documentJoined'].forEach(item => {
         document.getElementById('tab-' + item).classList.toggle('active', item === view);
         document.getElementById('view-' + item).classList.toggle('active', item === view);
       });
@@ -1232,7 +1471,7 @@ const adminHTML = `<!doctype html>
       if (!filteredItems(type).length) {
         setRows(rowsId, '<tr><td colspan="' + colspan + '" class="empty">没有匹配结果。</td></tr>');
       } else {
-        setRows(rowsId, data.map(item => type === 'chat' ? chatRow(item) : contactRow(item)).join(''));
+        setRows(rowsId, data.map(item => type === 'chat' ? chatRow(item) : type === 'contact' ? contactRow(item) : documentRow(item)).join(''));
       }
       syncPageCheck(type);
       updatePager(type);
@@ -1244,10 +1483,10 @@ const adminHTML = `<!doctype html>
       const data = pageJoinedItems(type);
       const colspan = type === 'chat' ? 3 : 4;
       if (!filteredJoinedItems(type).length) {
-        const label = type === 'chat' ? '群组' : '联系人';
+        const label = type === 'chat' ? '群组' : type === 'contact' ? '联系人' : '云文档';
         setRows(rowsId, '<tr><td colspan="' + colspan + '" class="empty">暂无已加入' + label + '。</td></tr>');
       } else {
-        setRows(rowsId, data.map(item => type === 'chat' ? joinedChatRow(item) : joinedContactRow(item)).join(''));
+        setRows(rowsId, data.map(item => type === 'chat' ? joinedChatRow(item) : type === 'contact' ? joinedContactRow(item) : joinedDocumentRow(item)).join(''));
       }
       updateJoinedPager(type);
       updateMetrics();
@@ -1273,6 +1512,15 @@ const adminHTML = `<!doctype html>
         '<td>' + escapeHtml(item.email || '') + '</td></tr>';
     }
 
+    function documentRow(item) {
+      const key = sourceKey('document', item);
+      return '<tr><td><input type="checkbox" class="document" data-key="' + escapeHtml(key) + '" onchange="toggleOne(\'document\', this.dataset.key, this.checked)" ' + checkedAttr('document', key) + ' /></td>' +
+        '<td>' + escapeHtml(item.title || '') + '</td>' +
+        '<td class="mono">' + escapeHtml(item.type || '-') + '</td>' +
+        '<td class="mono">' + escapeHtml(item.token || '-') + '</td>' +
+        '<td>' + documentLink(item) + '</td></tr>';
+    }
+
     function joinedChatRow(item) {
       return '<tr><td><div class="source-name"><span class="status-dot"></span><span>' + escapeHtml(item.name || '') + '</span></div></td>' +
         '<td class="mono">' + escapeHtml(item.chat_id || '-') + '</td>' +
@@ -1285,6 +1533,18 @@ const adminHTML = `<!doctype html>
         '<td class="mono">' + escapeHtml(key || '-') + '</td>' +
         '<td class="mono">' + escapeHtml(item.chat_id || '-') + '</td>' +
         '<td>' + escapeHtml(item.email || '') + '</td></tr>';
+    }
+
+    function joinedDocumentRow(item) {
+      return '<tr><td><div class="source-name"><span class="status-dot"></span><span>' + escapeHtml(item.title || '') + '</span></div></td>' +
+        '<td class="mono">' + escapeHtml(item.type || '-') + '</td>' +
+        '<td class="mono">' + escapeHtml(item.token || '-') + '</td>' +
+        '<td>' + documentLink(item) + '</td></tr>';
+    }
+
+    function documentLink(item) {
+      if (!item.url) return '-';
+      return '<a href="' + escapeHtml(item.url) + '" target="_blank" rel="noreferrer">打开</a>';
     }
 
     function filteredItems(type) {
@@ -1391,7 +1651,7 @@ const adminHTML = `<!doctype html>
 
     function togglePage(type, checked) {
       pageItems(type).forEach(item => {
-        const key = type === 'chat' ? item.chat_id : (item.open_id || item.user_id);
+        const key = sourceKey(type, item);
         if (!key) return;
         if (checked) state[type].selected.add(key); else state[type].selected.delete(key);
       });
@@ -1402,7 +1662,7 @@ const adminHTML = `<!doctype html>
     function syncPageCheck(type) {
       const checkbox = document.getElementById(type + 'CheckAll');
       const page = pageItems(type);
-      checkbox.checked = page.length > 0 && page.every(item => state[type].selected.has(type === 'chat' ? item.chat_id : (item.open_id || item.user_id)));
+      checkbox.checked = page.length > 0 && page.every(item => state[type].selected.has(sourceKey(type, item)));
     }
 
     function selectedItems(type) {
@@ -1427,7 +1687,9 @@ const adminHTML = `<!doctype html>
     }
 
     function sourceKey(type, item) {
-      return type === 'chat' ? item.chat_id : (item.open_id || item.user_id);
+      if (type === 'chat') return item.chat_id;
+      if (type === 'contact') return item.open_id || item.user_id;
+      return (item.type || '') + ':' + (item.token || '');
     }
 
     function checkedAttr(type, key) {
@@ -1439,12 +1701,16 @@ const adminHTML = `<!doctype html>
     function updateMetrics() {
       document.getElementById('chatSelectedCount').textContent = state.chat.selected.size;
       document.getElementById('contactSelectedCount').textContent = state.contact.selected.size;
+      document.getElementById('documentSelectedCount').textContent = state.document.selected.size;
       document.getElementById('chatLoadedCount').textContent = state.chat.items.length;
       document.getElementById('contactLoadedCount').textContent = state.contact.items.length;
+      document.getElementById('documentLoadedCount').textContent = state.document.items.length;
       document.getElementById('chatTabCount').textContent = filteredItems('chat').length;
       document.getElementById('contactTabCount').textContent = filteredItems('contact').length;
+      document.getElementById('documentTabCount').textContent = filteredItems('document').length;
       document.getElementById('chatJoinedTabCount').textContent = filteredJoinedItems('chat').length;
       document.getElementById('contactJoinedTabCount').textContent = filteredJoinedItems('contact').length;
+      document.getElementById('documentJoinedTabCount').textContent = filteredJoinedItems('document').length;
       updateSourceBadge();
     }
 
@@ -1454,7 +1720,9 @@ const adminHTML = `<!doctype html>
         chat: '群组候选',
         chatJoined: '已加入群组',
         contact: '联系人候选',
-        contactJoined: '已加入联系人'
+        contactJoined: '已加入联系人',
+        document: '云文档候选',
+        documentJoined: '已加入云文档'
       };
       const count = view.endsWith('Joined')
         ? filteredJoinedItems(view.replace('Joined', '')).length
@@ -1477,6 +1745,7 @@ const adminHTML = `<!doctype html>
     loadMe();
     loadCachedChats(true);
     loadCachedContacts(true);
+    loadCachedDocuments(true);
     updateMetrics();
   </script>
 </body>
