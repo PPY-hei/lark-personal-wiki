@@ -177,6 +177,60 @@ func (c *Client) GenerateAnswer(ctx context.Context, question string, contextTex
 	return "", fmt.Errorf("response missing output text")
 }
 
+func (c *Client) ExpandSearchKeywords(ctx context.Context, question string) ([]string, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("OPENAI_API_KEY is required")
+	}
+	prompt := buildKeywordPrompt(question)
+	body, err := json.Marshal(map[string]any{
+		"model": c.model,
+		"input": prompt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal keyword expansion request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create keyword expansion request: %w", err)
+	}
+	c.setHeaders(req, c.apiKey)
+
+	var payload struct {
+		OutputText string `json:"output_text"`
+		Output     []struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Error apiError `json:"error"`
+	}
+	if err := c.do(req, &payload); err != nil {
+		return nil, err
+	}
+	if payload.Error.Message != "" {
+		return nil, fmt.Errorf("keyword expansion failed: %s", payload.Error.Message)
+	}
+	text := strings.TrimSpace(payload.OutputText)
+	if text == "" {
+		for _, output := range payload.Output {
+			for _, content := range output.Content {
+				if strings.TrimSpace(content.Text) != "" {
+					text = strings.TrimSpace(content.Text)
+					break
+				}
+			}
+			if text != "" {
+				break
+			}
+		}
+	}
+	if text == "" {
+		return nil, fmt.Errorf("keyword expansion response missing output text")
+	}
+	return parseKeywordExpansion(text)
+}
+
 func (c *Client) DescribeImage(ctx context.Context, mimeType string, imageBytes []byte, hint string) (string, error) {
 	if c.visionAPIKey == "" {
 		return "", fmt.Errorf("VISION_API_KEY or OPENAI_API_KEY is required")
@@ -303,4 +357,56 @@ func buildPrompt(question string, contextText string) string {
 
 聊天记录上下文：
 ` + contextText
+}
+
+func buildKeywordPrompt(question string) string {
+	return `你是飞书个人知识库的检索词规划器。请把用户问题扩展成适合全文检索的关键词。
+
+要求：
+1. 返回严格 JSON，不要 markdown，不要解释。
+2. JSON 格式：{"keywords":["..."]}。
+3. 包含原始问题里的关键实体、英文技术词、缩写、配置字段、路径片段、同义词。
+4. 中英文混合词要拆出英文技术词，例如“hive的jdbc路径”应包含 "hive"、"jdbc"、"jdbc:hive2"。
+5. 不要返回太泛的词，比如“什么”、“怎么”、“路径”、“配置”，除非和技术词组合。
+6. 最多 12 个关键词。
+
+用户问题：
+` + question
+}
+
+func parseKeywordExpansion(text string) ([]string, error) {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
+	text = strings.TrimSuffix(text, "```")
+	text = strings.TrimSpace(text)
+
+	var payload struct {
+		Keywords []string `json:"keywords"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		var raw []string
+		if err2 := json.Unmarshal([]byte(text), &raw); err2 != nil {
+			return nil, fmt.Errorf("decode keyword expansion: %w", err)
+		}
+		payload.Keywords = raw
+	}
+	keywords := make([]string, 0, len(payload.Keywords))
+	seen := make(map[string]bool)
+	for _, keyword := range payload.Keywords {
+		keyword = strings.TrimSpace(keyword)
+		if keyword == "" {
+			continue
+		}
+		key := strings.ToLower(keyword)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		keywords = append(keywords, keyword)
+		if len(keywords) >= 12 {
+			break
+		}
+	}
+	return keywords, nil
 }

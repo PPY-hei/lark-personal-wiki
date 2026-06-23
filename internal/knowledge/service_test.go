@@ -79,3 +79,11 @@ func TestExtractKeywordsAddsASCIIWordsFromMixedText(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeKeywordsPrefersExpandedTerms(t *testing.T) {
+	got := mergeKeywords([]string{"jdbc:hive2", "hive", "jdbc"}, []string{"hive的jdbc路径", "hive"}, 4)
+	want := []string{"jdbc:hive2", "hive", "jdbc", "hive的jdbc路径"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("keywords = %#v, want %#v", got, want)
+	}
+}

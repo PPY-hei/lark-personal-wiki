@@ -15,6 +15,7 @@ import (
 type AIClient interface {
 	Embed(ctx context.Context, input string) ([]float32, error)
 	GenerateAnswer(ctx context.Context, question string, contextText string) (string, error)
+	ExpandSearchKeywords(ctx context.Context, question string) ([]string, error)
 	Model() string
 }
 
@@ -120,17 +121,30 @@ func (s *Service) Ask(ctx context.Context, question string, limit int) (AskResul
 }
 
 func (s *Service) Retrieve(ctx context.Context, question string, limit int) ([]RetrievedChunk, error) {
+	keywords := s.expandKeywords(ctx, question)
 	if s.useEmbeddings {
 		embedding, err := s.ai.Embed(ctx, question)
 		if err != nil {
 			return nil, err
 		}
-		return s.SearchHybrid(ctx, question, embedding, limit)
+		return s.SearchHybrid(ctx, question, keywords, embedding, limit)
 	}
-	return s.SearchByText(ctx, question, limit)
+	return s.SearchByText(ctx, question, keywords, limit)
 }
 
-func (s *Service) SearchHybrid(ctx context.Context, question string, embedding []float32, limit int) ([]RetrievedChunk, error) {
+func (s *Service) expandKeywords(ctx context.Context, question string) []string {
+	local := extractKeywords(question)
+	if s.ai == nil {
+		return local
+	}
+	gptKeywords, err := s.ai.ExpandSearchKeywords(ctx, question)
+	if err != nil {
+		return local
+	}
+	return mergeKeywords(gptKeywords, local, 16)
+}
+
+func (s *Service) SearchHybrid(ctx context.Context, question string, keywords []string, embedding []float32, limit int) ([]RetrievedChunk, error) {
 	if limit <= 0 {
 		limit = 8
 	}
@@ -138,7 +152,7 @@ func (s *Service) SearchHybrid(ctx context.Context, question string, embedding [
 	if err != nil {
 		return nil, err
 	}
-	textItems, err := s.SearchByText(ctx, question, limit)
+	textItems, err := s.SearchByText(ctx, question, keywords, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -175,8 +189,10 @@ func (s *Service) SearchByEmbedding(ctx context.Context, embedding []float32, li
 	return scanChunks(rows)
 }
 
-func (s *Service) SearchByText(ctx context.Context, question string, limit int) ([]RetrievedChunk, error) {
-	keywords := extractKeywords(question)
+func (s *Service) SearchByText(ctx context.Context, question string, keywords []string, limit int) ([]RetrievedChunk, error) {
+	if len(keywords) == 0 {
+		keywords = extractKeywords(question)
+	}
 	query := strings.Join(keywords, " | ")
 	if strings.TrimSpace(query) == "" {
 		query = question
@@ -555,6 +571,23 @@ func appendKeyword(keywords []string, seen map[string]bool, item string) []strin
 	}
 	seen[key] = true
 	return append(keywords, item)
+}
+
+func mergeKeywords(primary []string, fallback []string, limit int) []string {
+	if limit <= 0 {
+		limit = 16
+	}
+	seen := make(map[string]bool)
+	keywords := make([]string, 0, limit)
+	for _, group := range [][]string{primary, fallback} {
+		for _, item := range group {
+			keywords = appendKeyword(keywords, seen, item)
+			if len(keywords) >= limit {
+				return keywords
+			}
+		}
+	}
+	return keywords
 }
 
 func keywordLikePatterns(keywords []string) []string {
