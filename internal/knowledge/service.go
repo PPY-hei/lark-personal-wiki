@@ -54,6 +54,34 @@ type unitCandidate struct {
 	MessageIDs   []int64
 }
 
+const sourceDisplayNameSQL = `
+			coalesce(
+				nullif(c.name, ''),
+				CASE
+					WHEN nullif(ct.name, '') IS NOT NULL THEN
+						coalesce(nullif(au.name, ''), nullif(au.open_id, ''), nullif(au.user_id, ''), '授权用户') || ' 与 ' || ct.name || ' 的私聊'
+				END,
+				kc.metadata->>'feishu_chat_id',
+				kc.source_id
+			)`
+
+const sourceDisplayJoinsSQL = `
+		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
+		LEFT JOIN LATERAL (
+			SELECT name
+			FROM contacts
+			WHERE feishu_chat_id = kc.metadata->>'feishu_chat_id'
+			  AND nullif(name, '') IS NOT NULL
+			ORDER BY selected DESC, updated_at DESC, id DESC
+			LIMIT 1
+		) ct ON true
+		LEFT JOIN LATERAL (
+			SELECT name, open_id, user_id
+			FROM feishu_auth_sessions
+			ORDER BY created_at DESC
+			LIMIT 1
+		) au ON true`
+
 func NewService(db *pgxpool.Pool, ai AIClient, useEmbeddings bool) *Service {
 	return &Service{db: db, ai: ai, useEmbeddings: useEmbeddings}
 }
@@ -169,7 +197,7 @@ func (s *Service) SearchByEmbedding(ctx context.Context, embedding []float32, li
 			kc.id,
 			kc.source_type,
 			kc.source_id,
-			coalesce(nullif(c.name, ''), kc.metadata->>'feishu_chat_id', kc.source_id) || ' / ' ||
+`+sourceDisplayNameSQL+` || ' / ' ||
 				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
 				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
 			kc.content,
@@ -177,7 +205,7 @@ func (s *Service) SearchByEmbedding(ctx context.Context, embedding []float32, li
 			kc.created_at,
 			1 - (kc.embedding <=> $1::vector) AS score
 		FROM knowledge_chunks kc
-		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
+`+sourceDisplayJoinsSQL+`
 		WHERE kc.embedding IS NOT NULL
 		ORDER BY kc.embedding <=> $1::vector
 		LIMIT $2
@@ -206,7 +234,7 @@ func (s *Service) SearchByText(ctx context.Context, question string, keywords []
 			kc.id,
 			kc.source_type,
 			kc.source_id,
-			coalesce(nullif(c.name, ''), kc.metadata->>'feishu_chat_id', kc.source_id) || ' / ' ||
+`+sourceDisplayNameSQL+` || ' / ' ||
 				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
 				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
 			kc.content,
@@ -217,7 +245,7 @@ func (s *Service) SearchByText(ctx context.Context, question string, keywords []
 				CASE WHEN $3::text[] IS NOT NULL AND kc.content ILIKE ANY($3::text[]) THEN 1 ELSE 0 END
 			) AS score
 		FROM knowledge_chunks kc
-		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
+`+sourceDisplayJoinsSQL+`
 		CROSS JOIN q
 		WHERE to_tsvector('simple', kc.content) @@ q.tsq
 		   OR ($3::text[] IS NOT NULL AND kc.content ILIKE ANY($3::text[]))
@@ -266,7 +294,7 @@ func (s *Service) SearchRecent(ctx context.Context, limit int) ([]RetrievedChunk
 			kc.id,
 			kc.source_type,
 			kc.source_id,
-			coalesce(nullif(c.name, ''), kc.metadata->>'feishu_chat_id', kc.source_id) || ' / ' ||
+`+sourceDisplayNameSQL+` || ' / ' ||
 				coalesce(kc.metadata->>'unit_date', split_part(kc.source_id, ':', 2), to_char(kc.created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')) || ' / 片段 ' ||
 				((coalesce(nullif(kc.metadata->>'chunk_index', ''), '0'))::int + 1)::text AS display_source,
 			kc.content,
@@ -274,7 +302,7 @@ func (s *Service) SearchRecent(ctx context.Context, limit int) ([]RetrievedChunk
 			kc.created_at,
 			0::float8 AS score
 		FROM knowledge_chunks kc
-		LEFT JOIN chats c ON c.id = kc.chat_id OR c.feishu_chat_id = kc.metadata->>'feishu_chat_id'
+`+sourceDisplayJoinsSQL+`
 		ORDER BY kc.updated_at DESC
 		LIMIT $1
 	`, limit)
