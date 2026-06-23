@@ -2,7 +2,9 @@ package autoreply
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"feishu-kb-assistant/internal/auth"
 	"feishu-kb-assistant/internal/message"
@@ -23,6 +25,20 @@ type stubContactRepo struct {
 
 func (s stubContactRepo) IsSelectedContactChat(_ context.Context, chatID string) (bool, error) {
 	return s.selected[chatID], nil
+}
+
+type stubReplyRepo struct{}
+
+func (s stubReplyRepo) AutoReplyAlreadySent(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (s stubReplyRepo) SaveAutoReplyResult(context.Context, message.Message, string, string, string, error) error {
+	return nil
+}
+
+func (s stubReplyRepo) RecentMessagesByChatSender(context.Context, string, string, time.Time, time.Time, int) ([]message.Message, error) {
+	return nil, nil
 }
 
 func TestShouldReply(t *testing.T) {
@@ -152,5 +168,53 @@ func TestShouldReply(t *testing.T) {
 				t.Fatalf("Identity = %v, want %v", got.Identity, tt.wantIdentity)
 			}
 		})
+	}
+}
+
+func TestBuildConversationQuestionMergesMessages(t *testing.T) {
+	got := buildConversationQuestion([]message.Message{
+		{ContentText: "hive的账号密码是什么"},
+		{ContentText: "怎么不回答我了"},
+	})
+
+	for _, want := range []string{"连续发送的私聊消息", "hive的账号密码是什么", "怎么不回答我了"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("merged question missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestScheduleP2PReplyDebouncesByChatAndSender(t *testing.T) {
+	service := New(nil, nil, stubReplyRepo{}, nil, nil, nil)
+	first := message.Message{
+		FeishuMessageID: "om_1",
+		FeishuChatID:    "oc_1",
+		FeishuSenderID:  "ou_1",
+		ContentText:     "hive的账号密码是什么",
+	}
+	second := message.Message{
+		FeishuMessageID: "om_2",
+		FeishuChatID:    "oc_1",
+		FeishuSenderID:  "ou_1",
+		ContentText:     "怎么不回答我了",
+	}
+
+	service.scheduleP2PReply(first)
+	service.scheduleP2PReply(second)
+
+	key := p2pReplyKey(second)
+	service.p2pMu.Lock()
+	pending := service.p2pPending[key]
+	timerCount := len(service.p2pTimers)
+	if timer := service.p2pTimers[key]; timer != nil {
+		timer.Stop()
+	}
+	service.p2pMu.Unlock()
+
+	if pending.Message.FeishuMessageID != "om_2" {
+		t.Fatalf("pending message = %s, want om_2", pending.Message.FeishuMessageID)
+	}
+	if timerCount != 1 {
+		t.Fatalf("timer count = %d, want 1", timerCount)
 	}
 }

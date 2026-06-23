@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -109,6 +110,57 @@ func (r *Repository) FindByFeishuMessageID(ctx context.Context, feishuMessageID 
 		return Message{}, false, fmt.Errorf("find message: %w", err)
 	}
 	return msg, true, nil
+}
+
+func (r *Repository) RecentMessagesByChatSender(ctx context.Context, chatID string, senderID string, since time.Time, until time.Time, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT
+			feishu_message_id,
+			feishu_chat_id,
+			COALESCE(feishu_sender_id, ''),
+			message_type,
+			COALESCE(content_text, ''),
+			raw_content,
+			raw_payload,
+			sent_at
+		FROM messages
+		WHERE feishu_chat_id=$1
+		  AND COALESCE(feishu_sender_id, '')=$2
+		  AND COALESCE(sent_at, created_at) >= $3
+		  AND COALESCE(sent_at, created_at) <= $4
+		  AND NULLIF(trim(COALESCE(content_text, '')), '') IS NOT NULL
+		ORDER BY COALESCE(sent_at, created_at), id
+		LIMIT $5
+	`, chatID, senderID, since, until, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent chat sender messages: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]Message, 0)
+	for rows.Next() {
+		var msg Message
+		if err := rows.Scan(
+			&msg.FeishuMessageID,
+			&msg.FeishuChatID,
+			&msg.FeishuSenderID,
+			&msg.MessageType,
+			&msg.ContentText,
+			&msg.RawContent,
+			&msg.RawPayload,
+			&msg.SentAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan recent chat sender message: %w", err)
+		}
+		items = append(items, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent chat sender messages: %w", err)
+	}
+	return items, nil
 }
 
 func (r *Repository) CountMessages(ctx context.Context) (int64, error) {
