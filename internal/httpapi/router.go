@@ -615,6 +615,70 @@ const adminHTML = `<!doctype html>
     }
     .contact-toolbar { grid-template-columns: minmax(190px, .8fr) minmax(220px, 1fr) auto auto auto; }
     .ask-toolbar { grid-template-columns: minmax(260px, 1fr) auto; }
+    .source-console { overflow: hidden; }
+    .source-tabs {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0;
+      padding: 8px;
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(90deg, rgba(47, 93, 80, .06), transparent 36%),
+        var(--paper);
+    }
+    .source-tab {
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--graphite);
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 12px;
+      font-weight: 680;
+    }
+    .source-tab:hover { background: rgba(47, 93, 80, .07); color: var(--ink); }
+    .source-tab.active {
+      background: var(--white);
+      color: var(--ink);
+      box-shadow: 0 1px 0 rgba(255,255,255,.9), inset 0 -2px 0 var(--moss);
+    }
+    .source-tab span {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--graphite);
+    }
+    .source-view { display: none; }
+    .source-view.active { display: block; }
+    .joined-table th:first-child, .joined-table td:first-child { width: auto; }
+    .joined-toolbar {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto auto;
+      gap: 10px;
+      padding: 14px 18px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+    }
+    .source-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .source-name span:last-child {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--moss);
+      box-shadow: 0 0 0 3px rgba(47, 93, 80, .12);
+      flex: 0 0 auto;
+    }
     input:not([type="checkbox"]), select {
       border: 1px solid var(--line);
       background: var(--white);
@@ -743,7 +807,7 @@ const adminHTML = `<!doctype html>
       header { align-items: flex-start; flex-direction: column; }
       main { grid-template-columns: 1fr; }
       .timeline { min-width: 0; width: 100%; grid-template-columns: 64px 1fr 40px 1fr 48px; }
-      .toolbar, .contact-toolbar, .ask-toolbar { grid-template-columns: 1fr; }
+      .toolbar, .contact-toolbar, .ask-toolbar, .joined-toolbar, .source-tabs { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -822,68 +886,117 @@ const adminHTML = `<!doctype html>
         </div>
         <div id="askAnswer" class="answer-box">答案会显示在这里。</div>
       </section>
-      <section class="panel">
+      <section class="panel source-console">
         <div class="section-head">
           <div>
-            <h2>群组知识源</h2>
-            <div class="section-copy">搜索群名或 Chat ID，勾选后写入本地知识源配置。</div>
+            <h2>知识源</h2>
+            <div class="section-copy">候选列表用于添加，已加入列表用于核对当前生效的群组和联系人。</div>
           </div>
-          <span class="badge" id="chatResultBadge">未加载</span>
+          <span class="badge" id="sourceResultBadge">未加载</span>
         </div>
-        <div class="toolbar">
-          <input id="chatSearch" placeholder="搜索群名称 / Chat ID" oninput="setSearch('chat', this.value)" />
-          <select id="chatPageSize" onchange="setPageSize('chat', this.value)">
-            <option value="10">每页 10</option>
-            <option value="20" selected>每页 20</option>
-            <option value="50">每页 50</option>
-          </select>
-          <button onclick="loadChats()">拉取我的群组</button>
-          <button class="secondary" onclick="saveChats()">保存选中群组</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th><input type="checkbox" id="chatCheckAll" onchange="togglePage('chat', this.checked)" /></th><th>群名称</th><th>Chat ID</th><th>知识库状态</th></tr></thead>
-            <tbody id="chatRows"><tr><td colspan="4" class="empty">授权后拉取群组。</td></tr></tbody>
-          </table>
-        </div>
-        <div class="pager">
-          <div id="chatPageInfo">第 0 / 0 页</div>
-          <div class="pager-actions">
-            <button class="secondary" onclick="prevPage('chat')">上一页</button>
-            <button class="secondary" onclick="nextPage('chat')">下一页</button>
+        <nav class="source-tabs" aria-label="知识源视图">
+          <button class="source-tab active" id="tab-chat" onclick="switchSourceView('chat')">群组候选 <span id="chatTabCount">0</span></button>
+          <button class="source-tab" id="tab-chatJoined" onclick="switchSourceView('chatJoined')">已加入群组 <span id="chatJoinedTabCount">0</span></button>
+          <button class="source-tab" id="tab-contact" onclick="switchSourceView('contact')">联系人候选 <span id="contactTabCount">0</span></button>
+          <button class="source-tab" id="tab-contactJoined" onclick="switchSourceView('contactJoined')">已加入联系人 <span id="contactJoinedTabCount">0</span></button>
+        </nav>
+        <div class="source-view active" id="view-chat">
+          <div class="toolbar">
+            <input id="chatSearch" placeholder="搜索群名称 / Chat ID" oninput="setSearch('chat', this.value)" />
+            <select id="chatPageSize" onchange="setPageSize('chat', this.value)">
+              <option value="10">每页 10</option>
+              <option value="20" selected>每页 20</option>
+              <option value="50">每页 50</option>
+            </select>
+            <button onclick="loadChats()">拉取我的群组</button>
+            <button class="secondary" onclick="saveChats()">保存选中群组</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th><input type="checkbox" id="chatCheckAll" onchange="togglePage('chat', this.checked)" /></th><th>群名称</th><th>Chat ID</th><th>知识库状态</th></tr></thead>
+              <tbody id="chatRows"><tr><td colspan="4" class="empty">授权后拉取群组。</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <div id="chatPageInfo">第 0 / 0 页</div>
+            <div class="pager-actions">
+              <button class="secondary" onclick="prevPage('chat')">上一页</button>
+              <button class="secondary" onclick="nextPage('chat')">下一页</button>
+            </div>
           </div>
         </div>
-      </section>
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <h2>联系人知识源</h2>
-            <div class="section-copy">按姓名搜索联系人。同步时会用当前授权用户身份尝试读取单聊历史。</div>
+        <div class="source-view" id="view-chatJoined">
+          <div class="joined-toolbar">
+            <input id="chatJoinedSearch" placeholder="搜索已加入群组 / Chat ID" oninput="setSearch('chatJoined', this.value)" />
+            <select id="chatJoinedPageSize" onchange="setPageSize('chatJoined', this.value)">
+              <option value="10">每页 10</option>
+              <option value="20" selected>每页 20</option>
+              <option value="50">每页 50</option>
+            </select>
+            <button class="secondary" onclick="loadCachedChats(true)">刷新已加入群组</button>
           </div>
-          <span class="badge" id="contactResultBadge">未加载</span>
+          <div class="table-wrap">
+            <table class="joined-table">
+              <thead><tr><th>群名称</th><th>Chat ID</th><th>知识库状态</th></tr></thead>
+              <tbody id="chatJoinedRows"><tr><td colspan="3" class="empty">暂无已加入群组。</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <div id="chatJoinedPageInfo">第 0 / 0 页</div>
+            <div class="pager-actions">
+              <button class="secondary" onclick="prevPage('chatJoined')">上一页</button>
+              <button class="secondary" onclick="nextPage('chatJoined')">下一页</button>
+            </div>
+          </div>
         </div>
-        <div class="toolbar contact-toolbar">
-          <input id="contactRemoteQuery" placeholder="输入姓名搜索飞书用户" />
-          <input id="contactSearch" placeholder="筛选结果：姓名 / Open ID / Email" oninput="setSearch('contact', this.value)" />
-          <select id="contactPageSize" onchange="setPageSize('contact', this.value)">
-            <option value="10">每页 10</option>
-            <option value="20" selected>每页 20</option>
-            <option value="50">每页 50</option>
-          </select>
-          <button onclick="loadContacts()">拉取联系人</button>
-          <button class="secondary" onclick="saveContacts()">保存选中联系人</button>
+        <div class="source-view" id="view-contact">
+          <div class="toolbar contact-toolbar">
+            <input id="contactRemoteQuery" placeholder="输入姓名搜索飞书用户" />
+            <input id="contactSearch" placeholder="筛选结果：姓名 / Open ID / Email" oninput="setSearch('contact', this.value)" />
+            <select id="contactPageSize" onchange="setPageSize('contact', this.value)">
+              <option value="10">每页 10</option>
+              <option value="20" selected>每页 20</option>
+              <option value="50">每页 50</option>
+            </select>
+            <button onclick="loadContacts()">拉取联系人</button>
+            <button class="secondary" onclick="saveContacts()">保存选中联系人</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th><input type="checkbox" id="contactCheckAll" onchange="togglePage('contact', this.checked)" /></th><th>姓名</th><th>Open ID</th><th>单聊 Chat ID</th><th>Email</th></tr></thead>
+              <tbody id="contactRows"><tr><td colspan="5" class="empty">输入姓名后拉取联系人。</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <div id="contactPageInfo">第 0 / 0 页</div>
+            <div class="pager-actions">
+              <button class="secondary" onclick="prevPage('contact')">上一页</button>
+              <button class="secondary" onclick="nextPage('contact')">下一页</button>
+            </div>
+          </div>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th><input type="checkbox" id="contactCheckAll" onchange="togglePage('contact', this.checked)" /></th><th>姓名</th><th>Open ID</th><th>单聊 Chat ID</th><th>Email</th></tr></thead>
-            <tbody id="contactRows"><tr><td colspan="5" class="empty">输入姓名后拉取联系人。</td></tr></tbody>
-          </table>
-        </div>
-        <div class="pager">
-          <div id="contactPageInfo">第 0 / 0 页</div>
-          <div class="pager-actions">
-            <button class="secondary" onclick="prevPage('contact')">上一页</button>
-            <button class="secondary" onclick="nextPage('contact')">下一页</button>
+        <div class="source-view" id="view-contactJoined">
+          <div class="joined-toolbar">
+            <input id="contactJoinedSearch" placeholder="搜索已加入联系人 / Open ID / Chat ID" oninput="setSearch('contactJoined', this.value)" />
+            <select id="contactJoinedPageSize" onchange="setPageSize('contactJoined', this.value)">
+              <option value="10">每页 10</option>
+              <option value="20" selected>每页 20</option>
+              <option value="50">每页 50</option>
+            </select>
+            <button class="secondary" onclick="loadCachedContacts(true)">刷新已加入联系人</button>
+          </div>
+          <div class="table-wrap">
+            <table class="joined-table">
+              <thead><tr><th>姓名</th><th>Open ID</th><th>单聊 Chat ID</th><th>Email</th></tr></thead>
+              <tbody id="contactJoinedRows"><tr><td colspan="4" class="empty">暂无已加入联系人。</td></tr></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <div id="contactJoinedPageInfo">第 0 / 0 页</div>
+            <div class="pager-actions">
+              <button class="secondary" onclick="prevPage('contactJoined')">上一页</button>
+              <button class="secondary" onclick="nextPage('contactJoined')">下一页</button>
+            </div>
           </div>
         </div>
       </div>
@@ -892,8 +1005,9 @@ const adminHTML = `<!doctype html>
   <div id="toast" class="toast"></div>
   <script>
     const state = {
-      chat: { items: [], selected: new Set(), query: '', page: 1, pageSize: 20 },
-      contact: { items: [], selected: new Set(), query: '', page: 1, pageSize: 20 }
+      activeSourceView: 'chat',
+      chat: { items: [], joined: [], selected: new Set(), query: '', joinedQuery: '', page: 1, joinedPage: 1, pageSize: 20, joinedPageSize: 20 },
+      contact: { items: [], joined: [], selected: new Set(), query: '', joinedQuery: '', page: 1, joinedPage: 1, pageSize: 20, joinedPageSize: 20 }
     };
 
     async function api(path, options) {
@@ -923,7 +1037,7 @@ const adminHTML = `<!doctype html>
         state.chat.items = data.items || [];
         restoreSelected('chat');
         state.chat.page = 1;
-        render('chat');
+        renderSource('chat');
         toast('已加载 ' + state.chat.items.length + ' 个群组');
       } catch (err) {
         setRows('chatRows', '<tr><td colspan="4" class="error">' + escapeHtml(err.message) + '</td></tr>');
@@ -940,18 +1054,22 @@ const adminHTML = `<!doctype html>
         body: JSON.stringify({ items })
       });
       await loadCachedChats(false);
+      switchSourceView('chatJoined');
       toast('已保存 ' + result.count + ' 个群组');
     }
 
     async function loadCachedChats(showMessage) {
       try {
         const data = await api('/api/admin/source/chats?local=true');
-        state.chat.items = data.items || [];
+        const items = data.items || [];
+        if (!state.chat.items.length) state.chat.items = items;
+        state.chat.joined = items.filter(item => item.selected);
         restoreSelected('chat');
-        render('chat');
-        if (showMessage && state.chat.items.length) toast('已恢复 ' + state.chat.items.length + ' 个本地群组');
+        renderSource('chat');
+        renderJoined('chat');
+        if (showMessage && state.chat.joined.length) toast('已恢复 ' + state.chat.joined.length + ' 个已加入群组');
       } catch (err) {
-        setRows('chatRows', '<tr><td colspan="4" class="error">' + escapeHtml(err.message) + '</td></tr>');
+        setRows('chatJoinedRows', '<tr><td colspan="3" class="error">' + escapeHtml(err.message) + '</td></tr>');
       }
     }
 
@@ -963,9 +1081,9 @@ const adminHTML = `<!doctype html>
         const data = await api('/api/admin/source/contacts?q=' + encodeURIComponent(query));
         state.contact.items = data.items || [];
         restoreSelected('contact');
-		state.contact.page = 1;
-		render('contact');
-		toast(data.warning || ('已加载 ' + state.contact.items.length + ' 个联系人'));
+        state.contact.page = 1;
+        renderSource('contact');
+        toast(data.warning || ('已加载 ' + state.contact.items.length + ' 个联系人'));
       } catch (err) {
         setRows('contactRows', '<tr><td colspan="5" class="error">' + escapeHtml(err.message) + '</td></tr>');
       }
@@ -981,18 +1099,22 @@ const adminHTML = `<!doctype html>
         body: JSON.stringify({ items })
       });
       await loadCachedContacts(false);
+      switchSourceView('contactJoined');
       toast('已保存 ' + result.count + ' 个联系人');
     }
 
     async function loadCachedContacts(showMessage) {
       try {
         const data = await api('/api/admin/source/contacts?local=true');
-        state.contact.items = data.items || [];
+        const items = data.items || [];
+        if (!state.contact.items.length) state.contact.items = items;
+        state.contact.joined = items.filter(item => item.selected);
         restoreSelected('contact');
-        render('contact');
-        if (showMessage && state.contact.items.length) toast('已恢复 ' + state.contact.items.length + ' 个本地联系人');
+        renderSource('contact');
+        renderJoined('contact');
+        if (showMessage && state.contact.joined.length) toast('已恢复 ' + state.contact.joined.length + ' 个已加入联系人');
       } catch (err) {
-        setRows('contactRows', '<tr><td colspan="5" class="error">' + escapeHtml(err.message) + '</td></tr>');
+        setRows('contactJoinedRows', '<tr><td colspan="4" class="error">' + escapeHtml(err.message) + '</td></tr>');
       }
     }
 
@@ -1079,6 +1201,7 @@ const adminHTML = `<!doctype html>
         });
         resultBox.textContent = '已解析 ' + data.resolved + ' 个联系人单聊会话。';
         await loadCachedContacts(false);
+        renderJoined('contact');
         toast('联系人单聊已解析');
       } catch (err) {
         resultBox.textContent = err.message;
@@ -1093,7 +1216,16 @@ const adminHTML = `<!doctype html>
       } catch {}
     }
 
-    function render(type) {
+    function switchSourceView(view) {
+      state.activeSourceView = view;
+      ['chat', 'chatJoined', 'contact', 'contactJoined'].forEach(item => {
+        document.getElementById('tab-' + item).classList.toggle('active', item === view);
+        document.getElementById('view-' + item).classList.toggle('active', item === view);
+      });
+      updateSourceBadge();
+    }
+
+    function renderSource(type) {
       const rowsId = type + 'Rows';
       const data = pageItems(type);
       const colspan = type === 'chat' ? 4 : 5;
@@ -1104,6 +1236,20 @@ const adminHTML = `<!doctype html>
       }
       syncPageCheck(type);
       updatePager(type);
+      updateMetrics();
+    }
+
+    function renderJoined(type) {
+      const rowsId = type + 'JoinedRows';
+      const data = pageJoinedItems(type);
+      const colspan = type === 'chat' ? 3 : 4;
+      if (!filteredJoinedItems(type).length) {
+        const label = type === 'chat' ? '群组' : '联系人';
+        setRows(rowsId, '<tr><td colspan="' + colspan + '" class="empty">暂无已加入' + label + '。</td></tr>');
+      } else {
+        setRows(rowsId, data.map(item => type === 'chat' ? joinedChatRow(item) : joinedContactRow(item)).join(''));
+      }
+      updateJoinedPager(type);
       updateMetrics();
     }
 
@@ -1127,10 +1273,30 @@ const adminHTML = `<!doctype html>
         '<td>' + escapeHtml(item.email || '') + '</td></tr>';
     }
 
+    function joinedChatRow(item) {
+      return '<tr><td><div class="source-name"><span class="status-dot"></span><span>' + escapeHtml(item.name || '') + '</span></div></td>' +
+        '<td class="mono">' + escapeHtml(item.chat_id || '-') + '</td>' +
+        '<td><span class="badge enabled">已加入</span></td></tr>';
+    }
+
+    function joinedContactRow(item) {
+      const key = item.open_id || item.user_id || '';
+      return '<tr><td><div class="source-name"><span class="status-dot"></span><span>' + escapeHtml(item.name || '') + '</span></div></td>' +
+        '<td class="mono">' + escapeHtml(key || '-') + '</td>' +
+        '<td class="mono">' + escapeHtml(item.chat_id || '-') + '</td>' +
+        '<td>' + escapeHtml(item.email || '') + '</td></tr>';
+    }
+
     function filteredItems(type) {
       const query = state[type].query.trim().toLowerCase();
       if (!query) return state[type].items;
       return state[type].items.filter(item => JSON.stringify(item).toLowerCase().includes(query));
+    }
+
+    function filteredJoinedItems(type) {
+      const query = state[type].joinedQuery.trim().toLowerCase();
+      if (!query) return state[type].joined;
+      return state[type].joined.filter(item => JSON.stringify(item).toLowerCase().includes(query));
     }
 
     function pageItems(type) {
@@ -1142,34 +1308,77 @@ const adminHTML = `<!doctype html>
       return items.slice(start, start + model.pageSize);
     }
 
+    function pageJoinedItems(type) {
+      const model = state[type];
+      const items = filteredJoinedItems(type);
+      const totalPages = Math.max(1, Math.ceil(items.length / model.joinedPageSize));
+      model.joinedPage = Math.min(Math.max(1, model.joinedPage), totalPages);
+      const start = (model.joinedPage - 1) * model.joinedPageSize;
+      return items.slice(start, start + model.joinedPageSize);
+    }
+
     function setSearch(type, value) {
+      if (type.endsWith('Joined')) {
+        const base = type.replace('Joined', '');
+        state[base].joinedQuery = value;
+        state[base].joinedPage = 1;
+        renderJoined(base);
+        return;
+      }
       state[type].query = value;
       state[type].page = 1;
-      render(type);
+      renderSource(type);
     }
 
     function setPageSize(type, value) {
+      if (type.endsWith('Joined')) {
+        const base = type.replace('Joined', '');
+        state[base].joinedPageSize = Number(value);
+        state[base].joinedPage = 1;
+        renderJoined(base);
+        return;
+      }
       state[type].pageSize = Number(value);
       state[type].page = 1;
-      render(type);
+      renderSource(type);
     }
 
     function prevPage(type) {
+      if (type.endsWith('Joined')) {
+        const base = type.replace('Joined', '');
+        state[base].joinedPage = Math.max(1, state[base].joinedPage - 1);
+        renderJoined(base);
+        return;
+      }
       state[type].page = Math.max(1, state[type].page - 1);
-      render(type);
+      renderSource(type);
     }
 
     function nextPage(type) {
+      if (type.endsWith('Joined')) {
+        const base = type.replace('Joined', '');
+        const totalPages = Math.max(1, Math.ceil(filteredJoinedItems(base).length / state[base].joinedPageSize));
+        state[base].joinedPage = Math.min(totalPages, state[base].joinedPage + 1);
+        renderJoined(base);
+        return;
+      }
       const totalPages = Math.max(1, Math.ceil(filteredItems(type).length / state[type].pageSize));
       state[type].page = Math.min(totalPages, state[type].page + 1);
-      render(type);
+      renderSource(type);
     }
 
     function updatePager(type) {
       const total = filteredItems(type).length;
       const totalPages = Math.max(1, Math.ceil(total / state[type].pageSize));
       document.getElementById(type + 'PageInfo').textContent = '第 ' + state[type].page + ' / ' + totalPages + ' 页 · 共 ' + total + ' 条';
-      document.getElementById(type + 'ResultBadge').textContent = total ? '显示 ' + total + ' 条' : '无结果';
+      updateSourceBadge();
+    }
+
+    function updateJoinedPager(type) {
+      const total = filteredJoinedItems(type).length;
+      const totalPages = Math.max(1, Math.ceil(total / state[type].joinedPageSize));
+      document.getElementById(type + 'JoinedPageInfo').textContent = '第 ' + state[type].joinedPage + ' / ' + totalPages + ' 页 · 共 ' + total + ' 条';
+      updateSourceBadge();
     }
 
     function toggleOne(type, key, checked) {
@@ -1177,6 +1386,7 @@ const adminHTML = `<!doctype html>
       if (checked) state[type].selected.add(key); else state[type].selected.delete(key);
       syncPageCheck(type);
       updateMetrics();
+      renderJoined(type);
     }
 
     function togglePage(type, checked) {
@@ -1185,7 +1395,8 @@ const adminHTML = `<!doctype html>
         if (!key) return;
         if (checked) state[type].selected.add(key); else state[type].selected.delete(key);
       });
-      render(type);
+      renderSource(type);
+      renderJoined(type);
     }
 
     function syncPageCheck(type) {
@@ -1195,15 +1406,28 @@ const adminHTML = `<!doctype html>
     }
 
     function selectedItems(type) {
-      return state[type].items.filter(item => state[type].selected.has(type === 'chat' ? item.chat_id : (item.open_id || item.user_id)));
+      const byKey = new Map();
+      [...state[type].joined, ...state[type].items].forEach(item => {
+        const key = sourceKey(type, item);
+        if (key) byKey.set(key, item);
+      });
+      return Array.from(state[type].selected).map(key => byKey.get(key)).filter(Boolean);
     }
 
     function restoreSelected(type) {
       state[type].selected.clear();
+      state[type].joined.forEach(item => {
+        const key = sourceKey(type, item);
+        if (key) state[type].selected.add(key);
+      });
       state[type].items.forEach(item => {
-        const key = type === 'chat' ? item.chat_id : (item.open_id || item.user_id);
+        const key = sourceKey(type, item);
         if (item.selected && key) state[type].selected.add(key);
       });
+    }
+
+    function sourceKey(type, item) {
+      return type === 'chat' ? item.chat_id : (item.open_id || item.user_id);
     }
 
     function checkedAttr(type, key) {
@@ -1217,6 +1441,25 @@ const adminHTML = `<!doctype html>
       document.getElementById('contactSelectedCount').textContent = state.contact.selected.size;
       document.getElementById('chatLoadedCount').textContent = state.chat.items.length;
       document.getElementById('contactLoadedCount').textContent = state.contact.items.length;
+      document.getElementById('chatTabCount').textContent = filteredItems('chat').length;
+      document.getElementById('contactTabCount').textContent = filteredItems('contact').length;
+      document.getElementById('chatJoinedTabCount').textContent = filteredJoinedItems('chat').length;
+      document.getElementById('contactJoinedTabCount').textContent = filteredJoinedItems('contact').length;
+      updateSourceBadge();
+    }
+
+    function updateSourceBadge() {
+      const view = state.activeSourceView;
+      const labels = {
+        chat: '群组候选',
+        chatJoined: '已加入群组',
+        contact: '联系人候选',
+        contactJoined: '已加入联系人'
+      };
+      const count = view.endsWith('Joined')
+        ? filteredJoinedItems(view.replace('Joined', '')).length
+        : filteredItems(view).length;
+      document.getElementById('sourceResultBadge').textContent = labels[view] + ' ' + count + ' 条';
     }
 
     function toast(message) {
