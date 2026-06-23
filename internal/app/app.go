@@ -16,7 +16,9 @@ import (
 	"feishu-kb-assistant/internal/knowledge"
 	"feishu-kb-assistant/internal/media"
 	"feishu-kb-assistant/internal/message"
+	"feishu-kb-assistant/internal/scheduler"
 	"feishu-kb-assistant/internal/source"
+	"feishu-kb-assistant/internal/syncer"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -99,6 +101,26 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		)
 		p2pPoller.SetMessageEnricher(mediaEnricher)
 		go p2pPoller.Start(runCtx)
+	}
+	if cfg.FeishuHourlySyncEnabled {
+		historySyncer := syncer.NewRunner(db, feishuClient, sourceRepo, messageRepo, func(ctx context.Context) (string, error) {
+			session, err := authRepo.Latest(ctx)
+			if err != nil {
+				return "", err
+			}
+			return session.AccessToken, nil
+		})
+		historySyncer.SetMessageEnricher(mediaEnricher)
+		hourlySync := scheduler.NewHourlySync(
+			logger,
+			authRepo,
+			feishuClient,
+			historySyncer,
+			knowledgeService,
+			cfg.FeishuHourlySyncInterval,
+			cfg.FeishuHourlySyncDays,
+		)
+		go hourlySync.Start(runCtx)
 	}
 	if shouldStartWebSocket(cfg.FeishuEventMode) {
 		wsRunner := feishu.NewWebSocketRunner(cfg.FeishuAppID, cfg.FeishuAppSecret, logger, eventHandler)

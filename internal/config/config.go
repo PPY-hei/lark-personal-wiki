@@ -33,6 +33,9 @@ type Config struct {
 	FeishuTokenRefreshEnabled  bool
 	FeishuTokenRefreshInterval time.Duration
 	FeishuTokenRefreshBefore   time.Duration
+	FeishuHourlySyncEnabled    bool
+	FeishuHourlySyncInterval   time.Duration
+	FeishuHourlySyncDays       int
 
 	OpenAIBaseURL          string
 	OpenAIAPIKey           string
@@ -81,6 +84,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	hourlySyncInterval, err := parseDurationEnv("FEISHU_HOURLY_SYNC_INTERVAL", "1h")
+	if err != nil {
+		return Config{}, err
+	}
+	hourlySyncDays, err := strconv.Atoi(getenv("FEISHU_HOURLY_SYNC_DAYS", "2"))
+	if err != nil {
+		return Config{}, errors.New("FEISHU_HOURLY_SYNC_DAYS must be an integer")
+	}
 
 	return Config{
 		AppEnv:                     getenv("APP_ENV", "local"),
@@ -104,6 +115,9 @@ func Load() (Config, error) {
 		FeishuTokenRefreshEnabled:  getenv("FEISHU_TOKEN_REFRESH_ENABLED", "true") == "true",
 		FeishuTokenRefreshInterval: tokenRefreshInterval,
 		FeishuTokenRefreshBefore:   tokenRefreshBefore,
+		FeishuHourlySyncEnabled:    getenv("FEISHU_HOURLY_SYNC_ENABLED", "true") == "true",
+		FeishuHourlySyncInterval:   hourlySyncInterval,
+		FeishuHourlySyncDays:       hourlySyncDays,
 		OpenAIBaseURL:              getenv("OPENAI_BASE_URL", getenv("base_url", "https://api.openai.com/v1")),
 		OpenAIAPIKey:               getenv("OPENAI_API_KEY", ""),
 		OpenAIModel:                getenv("OPENAI_MODEL", getenv("model", "gpt-5.5")),
