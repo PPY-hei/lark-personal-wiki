@@ -23,6 +23,8 @@ type Client struct {
 	embeddingAPIKey  string
 	embeddingModel   string
 	embeddingDims    int
+	webSearchEnabled bool
+	webSearchTool    string
 	http             *http.Client
 }
 
@@ -31,6 +33,46 @@ func NewClient(baseURL string, apiKey string, model string, embeddingBaseURL str
 }
 
 func NewClientWithVision(baseURL string, apiKey string, model string, embeddingBaseURL string, embeddingAPIKey string, embeddingModel string, embeddingDims int, visionBaseURL string, visionAPIKey string, visionModel string) *Client {
+	return NewClientWithOptions(ClientOptions{
+		BaseURL:          baseURL,
+		APIKey:           apiKey,
+		Model:            model,
+		EmbeddingBaseURL: embeddingBaseURL,
+		EmbeddingAPIKey:  embeddingAPIKey,
+		EmbeddingModel:   embeddingModel,
+		EmbeddingDims:    embeddingDims,
+		VisionBaseURL:    visionBaseURL,
+		VisionAPIKey:     visionAPIKey,
+		VisionModel:      visionModel,
+	})
+}
+
+type ClientOptions struct {
+	BaseURL          string
+	APIKey           string
+	Model            string
+	EmbeddingBaseURL string
+	EmbeddingAPIKey  string
+	EmbeddingModel   string
+	EmbeddingDims    int
+	VisionBaseURL    string
+	VisionAPIKey     string
+	VisionModel      string
+	WebSearchEnabled bool
+	WebSearchTool    string
+}
+
+func NewClientWithOptions(options ClientOptions) *Client {
+	baseURL := options.BaseURL
+	apiKey := options.APIKey
+	model := options.Model
+	embeddingBaseURL := options.EmbeddingBaseURL
+	embeddingAPIKey := options.EmbeddingAPIKey
+	embeddingModel := options.EmbeddingModel
+	embeddingDims := options.EmbeddingDims
+	visionBaseURL := options.VisionBaseURL
+	visionAPIKey := options.VisionAPIKey
+	visionModel := options.VisionModel
 	baseURL = normalizeBaseURL(baseURL)
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
@@ -61,6 +103,10 @@ func NewClientWithVision(baseURL string, apiKey string, model string, embeddingB
 	if embeddingDims < 0 {
 		embeddingDims = 0
 	}
+	webSearchTool := strings.TrimSpace(options.WebSearchTool)
+	if webSearchTool == "" {
+		webSearchTool = "web_search"
+	}
 	return &Client{
 		baseURL:          baseURL,
 		apiKey:           apiKey,
@@ -72,6 +118,8 @@ func NewClientWithVision(baseURL string, apiKey string, model string, embeddingB
 		embeddingAPIKey:  embeddingAPIKey,
 		embeddingModel:   embeddingModel,
 		embeddingDims:    embeddingDims,
+		webSearchEnabled: options.WebSearchEnabled,
+		webSearchTool:    webSearchTool,
 		http:             &http.Client{Timeout: 60 * time.Second},
 	}
 }
@@ -135,10 +183,48 @@ func (c *Client) GenerateAnswer(ctx context.Context, question string, contextTex
 		return "", fmt.Errorf("OPENAI_API_KEY is required")
 	}
 	prompt := buildPrompt(question, contextText)
-	body, err := json.Marshal(map[string]any{
+	return c.createTextResponse(ctx, prompt, nil)
+}
+
+func (c *Client) ShouldUseWebSearch(ctx context.Context, question string, contextText string) (bool, string, error) {
+	if c.apiKey == "" {
+		return false, "", fmt.Errorf("OPENAI_API_KEY is required")
+	}
+	if !c.webSearchEnabled {
+		return false, "web search disabled", nil
+	}
+	prompt := buildWebSearchDecisionPrompt(question, contextText)
+	text, err := c.createTextResponse(ctx, prompt, nil)
+	if err != nil {
+		return false, "", err
+	}
+	decision, reason, err := parseWebSearchDecision(text)
+	if err != nil {
+		return false, "", err
+	}
+	return decision, reason, nil
+}
+
+func (c *Client) GenerateAnswerWithWebSearch(ctx context.Context, question string, contextText string) (string, error) {
+	if c.apiKey == "" {
+		return "", fmt.Errorf("OPENAI_API_KEY is required")
+	}
+	if !c.webSearchEnabled {
+		return c.GenerateAnswer(ctx, question, contextText)
+	}
+	prompt := buildWebSearchPrompt(question, contextText)
+	return c.createTextResponse(ctx, prompt, []map[string]any{{"type": c.webSearchTool}})
+}
+
+func (c *Client) createTextResponse(ctx context.Context, prompt string, tools []map[string]any) (string, error) {
+	requestBody := map[string]any{
 		"model": c.model,
 		"input": prompt,
-	})
+	}
+	if len(tools) > 0 {
+		requestBody["tools"] = tools
+	}
+	body, err := json.Marshal(requestBody)
 	if err != nil {
 		return "", fmt.Errorf("marshal response request: %w", err)
 	}
@@ -149,14 +235,9 @@ func (c *Client) GenerateAnswer(ctx context.Context, question string, contextTex
 	c.setHeaders(req, c.apiKey)
 
 	var payload struct {
-		OutputText string `json:"output_text"`
-		Output     []struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		Error apiError `json:"error"`
+		OutputText string           `json:"output_text"`
+		Output     []responseOutput `json:"output"`
+		Error      apiError         `json:"error"`
 	}
 	if err := c.do(req, &payload); err != nil {
 		return "", err
@@ -164,13 +245,14 @@ func (c *Client) GenerateAnswer(ctx context.Context, question string, contextTex
 	if payload.Error.Message != "" {
 		return "", fmt.Errorf("response failed: %s", payload.Error.Message)
 	}
+	citations := collectURLCitations(payload.Output)
 	if strings.TrimSpace(payload.OutputText) != "" {
-		return strings.TrimSpace(payload.OutputText), nil
+		return appendURLCitations(strings.TrimSpace(payload.OutputText), citations), nil
 	}
 	for _, output := range payload.Output {
 		for _, content := range output.Content {
 			if strings.TrimSpace(content.Text) != "" {
-				return strings.TrimSpace(content.Text), nil
+				return appendURLCitations(strings.TrimSpace(content.Text), citations), nil
 			}
 		}
 	}
@@ -329,6 +411,27 @@ type apiError struct {
 	Type    string `json:"type"`
 }
 
+type responseOutput struct {
+	Content []struct {
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		Annotations []struct {
+			Type        string `json:"type"`
+			URLCitation struct {
+				URL   string `json:"url"`
+				Title string `json:"title"`
+			} `json:"url_citation"`
+			URL   string `json:"url"`
+			Title string `json:"title"`
+		} `json:"annotations"`
+	} `json:"content"`
+}
+
+type urlCitation struct {
+	Title string
+	URL   string
+}
+
 func base64Encode(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
 }
@@ -356,6 +459,46 @@ func buildPrompt(question string, contextText string) string {
 ` + question + `
 
 聊天记录上下文：
+` + contextText
+}
+
+func buildWebSearchDecisionPrompt(question string, contextText string) string {
+	return `你是个人知识库助手的联网搜索决策器。请判断回答用户问题时是否需要联网搜索。
+
+只在这些情况返回 true：
+1. 问题明显需要最新信息、当前状态、价格、新闻、版本、官方文档、网页资料或外部事实。
+2. 给定的聊天记录上下文不足以回答，并且问题不是只问个人历史聊天记录。
+3. 用户明确要求搜索、查一下网上、最新、今天、现在、官网、文档。
+
+这些情况返回 false：
+1. 聊天记录上下文已经足够回答。
+2. 问题主要是在问个人聊天记录、内部项目、账号、路径、历史结论。
+3. 联网搜索也不太可能知道内部私有信息。
+
+返回严格 JSON，不要 markdown，不要解释：
+{"needs_web_search":true,"reason":"..."}
+
+用户问题：
+` + question + `
+
+已检索到的个人知识库上下文：
+` + contextText
+}
+
+func buildWebSearchPrompt(question string, contextText string) string {
+	return `你是一个严谨的个人飞书知识库助手。你可以基于个人知识库上下文和联网搜索结果回答。
+
+要求：
+1. 优先使用个人知识库上下文；联网结果只用于补充最新或外部事实。
+2. 如果个人知识库和联网结果冲突，明确说明冲突，不要强行合并。
+3. 回答要先给结论，再给依据。
+4. 涉及代码、配置、账号、内部项目时，必须以个人知识库为准，不要用网上内容编造。
+5. 最后列出“参考来源”：个人知识库来源要写上下文来源标记里的可读名称、日期和片段；联网来源要写网页标题或域名。
+
+问题：
+` + question + `
+
+个人知识库上下文：
 ` + contextText
 }
 
@@ -409,4 +552,66 @@ func parseKeywordExpansion(text string) ([]string, error) {
 		}
 	}
 	return keywords, nil
+}
+
+func parseWebSearchDecision(text string) (bool, string, error) {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
+	text = strings.TrimSuffix(text, "```")
+	text = strings.TrimSpace(text)
+	var payload struct {
+		NeedsWebSearch bool   `json:"needs_web_search"`
+		Reason         string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return false, "", fmt.Errorf("decode web search decision: %w", err)
+	}
+	return payload.NeedsWebSearch, strings.TrimSpace(payload.Reason), nil
+}
+
+func collectURLCitations(outputs []responseOutput) []urlCitation {
+	citations := make([]urlCitation, 0)
+	seen := make(map[string]bool)
+	for _, output := range outputs {
+		for _, content := range output.Content {
+			for _, annotation := range content.Annotations {
+				url := strings.TrimSpace(firstNonEmpty(annotation.URLCitation.URL, annotation.URL))
+				if url == "" || seen[url] {
+					continue
+				}
+				seen[url] = true
+				citations = append(citations, urlCitation{
+					Title: firstNonEmpty(annotation.URLCitation.Title, annotation.Title, url),
+					URL:   url,
+				})
+			}
+		}
+	}
+	return citations
+}
+
+func appendURLCitations(answer string, citations []urlCitation) string {
+	answer = strings.TrimSpace(answer)
+	if len(citations) == 0 {
+		return answer
+	}
+	var builder strings.Builder
+	builder.WriteString(answer)
+	if !strings.Contains(answer, "联网来源") {
+		builder.WriteString("\n\n联网来源：")
+	}
+	for idx, citation := range citations {
+		if idx >= 5 {
+			break
+		}
+		title := firstNonEmpty(citation.Title, citation.URL)
+		builder.WriteString("\n- ")
+		builder.WriteString(title)
+		if citation.URL != "" && citation.URL != title {
+			builder.WriteString("：")
+			builder.WriteString(citation.URL)
+		}
+	}
+	return builder.String()
 }

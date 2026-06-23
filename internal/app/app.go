@@ -57,18 +57,20 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	messageRepo := message.NewRepository(db)
 	authRepo := auth.NewRepository(db)
 	sourceRepo := source.NewRepository(db)
-	openaiClient := openai.NewClientWithVision(
-		cfg.OpenAIBaseURL,
-		cfg.OpenAIAPIKey,
-		cfg.OpenAIModel,
-		cfg.OpenAIEmbeddingBaseURL,
-		cfg.OpenAIEmbeddingAPIKey,
-		cfg.OpenAIEmbeddingModel,
-		cfg.OpenAIEmbeddingDims,
-		cfg.VisionBaseURL,
-		cfg.VisionAPIKey,
-		cfg.VisionModel,
-	)
+	openaiClient := openai.NewClientWithOptions(openai.ClientOptions{
+		BaseURL:          cfg.OpenAIBaseURL,
+		APIKey:           cfg.OpenAIAPIKey,
+		Model:            cfg.OpenAIModel,
+		EmbeddingBaseURL: cfg.OpenAIEmbeddingBaseURL,
+		EmbeddingAPIKey:  cfg.OpenAIEmbeddingAPIKey,
+		EmbeddingModel:   cfg.OpenAIEmbeddingModel,
+		EmbeddingDims:    cfg.OpenAIEmbeddingDims,
+		VisionBaseURL:    cfg.VisionBaseURL,
+		VisionAPIKey:     cfg.VisionAPIKey,
+		VisionModel:      cfg.VisionModel,
+		WebSearchEnabled: cfg.OpenAIWebSearchEnabled,
+		WebSearchTool:    cfg.OpenAIWebSearchTool,
+	})
 	knowledgeService := knowledge.NewService(db, openaiClient, cfg.OpenAIEnableEmbeddings)
 	mediaEnricher := media.NewEnricher(logger, cfg.VisionEnabled, feishuClient, openaiClient, cfg.VisionMaxImageBytes)
 	eventHandler := feishu.NewEventHandler(cfg, logger, redisClient, messageRepo)

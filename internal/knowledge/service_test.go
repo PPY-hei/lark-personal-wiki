@@ -1,9 +1,49 @@
 package knowledge
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
+
+type stubAI struct {
+	needsWebSearch bool
+	webAnswer      string
+	webErr         error
+	plainAnswer    string
+	webCalls       int
+	plainCalls     int
+}
+
+func (s *stubAI) Embed(context.Context, string) ([]float32, error) {
+	return nil, nil
+}
+
+func (s *stubAI) GenerateAnswer(context.Context, string, string) (string, error) {
+	s.plainCalls++
+	return s.plainAnswer, nil
+}
+
+func (s *stubAI) GenerateAnswerWithWebSearch(context.Context, string, string) (string, error) {
+	s.webCalls++
+	if s.webErr != nil {
+		return "", s.webErr
+	}
+	return s.webAnswer, nil
+}
+
+func (s *stubAI) ShouldUseWebSearch(context.Context, string, string) (bool, string, error) {
+	return s.needsWebSearch, "需要最新信息", nil
+}
+
+func (s *stubAI) ExpandSearchKeywords(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+
+func (s *stubAI) Model() string {
+	return "stub"
+}
 
 func TestExpandSourceReferences(t *testing.T) {
 	chunks := []RetrievedChunk{
@@ -85,5 +125,37 @@ func TestMergeKeywordsPrefersExpandedTerms(t *testing.T) {
 	want := []string{"jdbc:hive2", "hive", "jdbc", "hive的jdbc路径"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("keywords = %#v, want %#v", got, want)
+	}
+}
+
+func TestGenerateAnswerUsesWebSearchWhenDecisionRequiresIt(t *testing.T) {
+	ai := &stubAI{webAnswer: "联网答案"}
+	service := &Service{ai: ai}
+
+	got, err := service.generateAnswer(context.Background(), "今天有什么更新", "上下文", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "联网答案" {
+		t.Fatalf("answer = %q, want 联网答案", got)
+	}
+	if ai.webCalls != 1 || ai.plainCalls != 0 {
+		t.Fatalf("webCalls=%d plainCalls=%d, want 1/0", ai.webCalls, ai.plainCalls)
+	}
+}
+
+func TestGenerateAnswerFallsBackWhenWebSearchFails(t *testing.T) {
+	ai := &stubAI{webErr: errors.New("unsupported tool"), plainAnswer: "知识库答案"}
+	service := &Service{ai: ai}
+
+	got, err := service.generateAnswer(context.Background(), "今天有什么更新", "上下文", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "知识库答案" {
+		t.Fatalf("answer = %q, want 知识库答案", got)
+	}
+	if ai.webCalls != 1 || ai.plainCalls != 1 {
+		t.Fatalf("webCalls=%d plainCalls=%d, want 1/1", ai.webCalls, ai.plainCalls)
 	}
 }

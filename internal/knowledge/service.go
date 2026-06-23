@@ -15,6 +15,8 @@ import (
 type AIClient interface {
 	Embed(ctx context.Context, input string) ([]float32, error)
 	GenerateAnswer(ctx context.Context, question string, contextText string) (string, error)
+	GenerateAnswerWithWebSearch(ctx context.Context, question string, contextText string) (string, error)
+	ShouldUseWebSearch(ctx context.Context, question string, contextText string) (bool, string, error)
 	ExpandSearchKeywords(ctx context.Context, question string) ([]string, error)
 	Model() string
 }
@@ -31,9 +33,11 @@ type IndexResult struct {
 }
 
 type AskResult struct {
-	Question string           `json:"question"`
-	Answer   string           `json:"answer"`
-	Sources  []RetrievedChunk `json:"sources"`
+	Question          string           `json:"question"`
+	Answer            string           `json:"answer"`
+	Sources           []RetrievedChunk `json:"sources"`
+	UsedWebSearch     bool             `json:"used_web_search"`
+	WebSearchDecision string           `json:"web_search_decision,omitempty"`
 }
 
 type RetrievedChunk struct {
@@ -136,7 +140,8 @@ func (s *Service) Ask(ctx context.Context, question string, limit int) (AskResul
 		return AskResult{}, err
 	}
 	contextText := buildContext(chunks)
-	answer, err := s.ai.GenerateAnswer(ctx, question, contextText)
+	useWebSearch, decisionReason := s.shouldUseWebSearch(ctx, question, contextText)
+	answer, err := s.generateAnswer(ctx, question, contextText, useWebSearch)
 	if err != nil {
 		_ = s.saveQALog(ctx, question, "", chunks, "failed", err)
 		return AskResult{}, err
@@ -145,7 +150,7 @@ func (s *Service) Ask(ctx context.Context, question string, limit int) (AskResul
 	if err := s.saveQALog(ctx, question, answer, chunks, "answered", nil); err != nil {
 		return AskResult{}, err
 	}
-	return AskResult{Question: question, Answer: answer, Sources: chunks}, nil
+	return AskResult{Question: question, Answer: answer, Sources: chunks, UsedWebSearch: useWebSearch, WebSearchDecision: decisionReason}, nil
 }
 
 func (s *Service) Retrieve(ctx context.Context, question string, limit int) ([]RetrievedChunk, error) {
@@ -158,6 +163,27 @@ func (s *Service) Retrieve(ctx context.Context, question string, limit int) ([]R
 		return s.SearchHybrid(ctx, question, keywords, embedding, limit)
 	}
 	return s.SearchByText(ctx, question, keywords, limit)
+}
+
+func (s *Service) shouldUseWebSearch(ctx context.Context, question string, contextText string) (bool, string) {
+	if s.ai == nil {
+		return false, ""
+	}
+	needsWeb, reason, err := s.ai.ShouldUseWebSearch(ctx, question, contextText)
+	if err != nil {
+		return false, ""
+	}
+	return needsWeb, reason
+}
+
+func (s *Service) generateAnswer(ctx context.Context, question string, contextText string, useWebSearch bool) (string, error) {
+	if useWebSearch {
+		answer, err := s.ai.GenerateAnswerWithWebSearch(ctx, question, contextText)
+		if err == nil {
+			return answer, nil
+		}
+	}
+	return s.ai.GenerateAnswer(ctx, question, contextText)
 }
 
 func (s *Service) expandKeywords(ctx context.Context, question string) []string {

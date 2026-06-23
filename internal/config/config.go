@@ -46,6 +46,8 @@ type Config struct {
 	OpenAIEmbeddingDims    int
 	OpenAIEnableEmbeddings bool
 	OpenAIWireAPI          string
+	OpenAIWebSearchEnabled bool
+	OpenAIWebSearchTool    string
 	VisionEnabled          bool
 	VisionBaseURL          string
 	VisionAPIKey           string
@@ -127,6 +129,8 @@ func Load() (Config, error) {
 		OpenAIEmbeddingDims:        embeddingDims,
 		OpenAIEnableEmbeddings:     getenv("OPENAI_ENABLE_EMBEDDINGS", "false") == "true",
 		OpenAIWireAPI:              getenv("OPENAI_WIRE_API", getenv("wire_api", "responses")),
+		OpenAIWebSearchEnabled:     getenv("OPENAI_WEB_SEARCH_ENABLED", "true") == "true",
+		OpenAIWebSearchTool:        getenv("OPENAI_WEB_SEARCH_TOOL", "web_search"),
 		VisionEnabled:              getenv("VISION_ENABLED", "true") == "true",
 		VisionBaseURL:              getenv("VISION_BASE_URL", getenv("OPENAI_BASE_URL", getenv("base_url", "https://api.openai.com/v1"))),
 		VisionAPIKey:               getenv("VISION_API_KEY", getenv("OPENAI_API_KEY", "")),
